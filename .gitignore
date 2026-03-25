@@ -12,6 +12,7 @@ mcpscope
 # Output of the go coverage tool
 *.out
 *.db
+dashboard/node_modules/
 
 # Dependency directories
 vendor/

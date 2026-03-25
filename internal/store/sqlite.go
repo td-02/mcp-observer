@@ -47,12 +47,14 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 			server_name,
 			method,
 			params_hash,
+			params_payload,
 			response_hash,
+			response_payload,
 			latency_ms,
 			is_error,
 			error_message,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.ExecContext(
@@ -63,7 +65,9 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 		trace.ServerName,
 		trace.Method,
 		trace.ParamsHash,
+		trace.ParamsPayload,
 		trace.ResponseHash,
+		trace.ResponsePayload,
 		trace.LatencyMs,
 		trace.IsError,
 		trace.ErrorMessage,
@@ -96,6 +100,10 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 		conditions = append(conditions, "is_error = ?")
 		args = append(args, *filter.IsError)
 	}
+	if filter.CreatedAfter != nil {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, filter.CreatedAfter.UTC())
+	}
 
 	query := `
 		SELECT
@@ -104,7 +112,9 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 			server_name,
 			method,
 			params_hash,
+			params_payload,
 			response_hash,
+			response_payload,
 			latency_ms,
 			is_error,
 			error_message,
@@ -132,7 +142,9 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 			server_name,
 			method,
 			params_hash,
+			params_payload,
 			response_hash,
+			response_payload,
 			latency_ms,
 			is_error,
 			error_message,
@@ -177,7 +189,9 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 			&trace.ServerName,
 			&trace.Method,
 			&trace.ParamsHash,
+			&trace.ParamsPayload,
 			&trace.ResponseHash,
+			&trace.ResponsePayload,
 			&trace.LatencyMs,
 			&trace.IsError,
 			&trace.ErrorMessage,

@@ -21,16 +21,18 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 
 	createdAt := time.Date(2026, 3, 19, 9, 30, 0, 0, time.UTC)
 	trace := Trace{
-		ID:           "550e8400-e29b-41d4-a716-446655440000",
-		TraceID:      "8f14e45f-ea4c-4d57-8b55-6e5d7f1db7b1",
-		ServerName:   "demo-server",
-		Method:       "tools/call",
-		ParamsHash:   "params-hash",
-		ResponseHash: "response-hash",
-		LatencyMs:    25,
-		IsError:      true,
-		ErrorMessage: "boom",
-		CreatedAt:    createdAt,
+		ID:              "550e8400-e29b-41d4-a716-446655440000",
+		TraceID:         "8f14e45f-ea4c-4d57-8b55-6e5d7f1db7b1",
+		ServerName:      "demo-server",
+		Method:          "tools/call",
+		ParamsHash:      "params-hash",
+		ParamsPayload:   `{"name":"ping"}`,
+		ResponseHash:    "response-hash",
+		ResponsePayload: `{"ok":true}`,
+		LatencyMs:       25,
+		IsError:         true,
+		ErrorMessage:    "boom",
+		CreatedAt:       createdAt,
 	}
 
 	if err := store.Insert(ctx, trace); err != nil {
@@ -63,6 +65,12 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	}
 	if got.ResponseHash != trace.ResponseHash {
 		t.Fatalf("response_hash = %q, want %q", got.ResponseHash, trace.ResponseHash)
+	}
+	if got.ParamsPayload != trace.ParamsPayload {
+		t.Fatalf("params_payload = %q, want %q", got.ParamsPayload, trace.ParamsPayload)
+	}
+	if got.ResponsePayload != trace.ResponsePayload {
+		t.Fatalf("response_payload = %q, want %q", got.ResponsePayload, trace.ResponsePayload)
 	}
 	if got.LatencyMs != trace.LatencyMs {
 		t.Fatalf("latency_ms = %d, want %d", got.LatencyMs, trace.LatencyMs)

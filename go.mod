@@ -3,6 +3,7 @@ module mcpscope
 go 1.25.0
 
 require (
+	github.com/fatih/color v1.18.0
 	github.com/golang-migrate/migrate/v4 v4.18.1
 	github.com/spf13/cobra v1.8.1
 	go.opentelemetry.io/otel v1.42.0
@@ -23,6 +24,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

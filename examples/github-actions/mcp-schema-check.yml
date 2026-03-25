@@ -1,0 +1,51 @@
+name: MCP Schema Check
+
+on:
+  pull_request:
+
+jobs:
+  schema-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build mcpscope
+        run: go build -o mcpscope .
+
+      - name: Capture current schema
+        run: ./mcpscope snapshot --server "${{ vars.MCP_SERVER_COMMAND }}" --output current.json
+
+      - name: Diff against baseline
+        id: schema_diff
+        shell: bash
+        run: |
+          set +e
+          OUTPUT=$(./mcpscope diff baseline.json current.json --exit-code --format json 2>&1)
+          STATUS=$?
+          {
+            echo 'diff_json<<EOF'
+            echo "$OUTPUT"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+          exit $STATUS
+
+      - name: Post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ toJson(steps.schema_diff.outputs.diff_json) }}`;
+            const body = `## MCP Schema Diff\n\n\`\`\`json\n${output}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

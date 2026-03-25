@@ -6,24 +6,27 @@ import (
 )
 
 type Trace struct {
-	ID           string
-	TraceID      string
-	ServerName   string
-	Method       string
-	ParamsHash   string
-	ResponseHash string
-	LatencyMs    int64
-	IsError      bool
-	ErrorMessage string
-	CreatedAt    time.Time
+	ID              string
+	TraceID         string
+	ServerName      string
+	Method          string
+	ParamsHash      string
+	ParamsPayload   string
+	ResponseHash    string
+	ResponsePayload string
+	LatencyMs       int64
+	IsError         bool
+	ErrorMessage    string
+	CreatedAt       time.Time
 }
 
 type QueryFilter struct {
-	TraceID    string
-	ServerName string
-	Method     string
-	IsError    *bool
-	Limit      int
+	TraceID      string
+	ServerName   string
+	Method       string
+	IsError      *bool
+	CreatedAfter *time.Time
+	Limit        int
 }
 
 type ListOptions struct {

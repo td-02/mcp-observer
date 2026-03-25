@@ -61,6 +61,7 @@ func newProxyCmd() *cobra.Command {
 				Transport:  normalizedTransport,
 				Store:      traceStore,
 				Telemetry:  telemetryClient,
+				Dashboard:  dashboardFS,
 				Stdin:      os.Stdin,
 				Stdout:     os.Stdout,
 				Stderr:     os.Stderr,

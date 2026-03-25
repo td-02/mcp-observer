@@ -1,0 +1,2 @@
+ALTER TABLE traces ADD COLUMN params_payload TEXT NOT NULL DEFAULT '';
+ALTER TABLE traces ADD COLUMN response_payload TEXT NOT NULL DEFAULT '';
