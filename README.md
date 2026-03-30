@@ -25,11 +25,11 @@ Agents increasingly call MCP tools in production, but when something fails the e
 
 - Transparent proxy for stdio and HTTP MCP transports
 - Live web dashboard with trace feed, latency percentiles, error rates, alert state, and alert event history
-- Environment scoping across traces, stats, alerts, export, and replay workflows
+- Workspace and environment scoping across traces, stats, alerts, export, and replay workflows
 - Bearer token protection for dashboard APIs and SSE streams
 - Retention policies and paginated trace browsing
 - Payload redaction before logs, storage, and UI rendering
-- Built-in latency P95 and error-rate alerts with webhook delivery
+- Built-in latency P95 and error-rate alerts with webhook, Slack, and PagerDuty delivery
 - SQLite persistence with SQL-backed latency and error aggregations
 - Trace export and replay for debugging, CI, and fixture generation
 - Schema snapshot and diff CLI for MCP compatibility checks
@@ -100,7 +100,7 @@ mcpscope replay --input traces.json --transport http --server http://127.0.0.1:8
 mcpscope replay --input traces.json -- uv run server.py
 ```
 
-Use export plus replay for regression debugging, smoke tests, and captured MCP fixtures.
+Use export plus replay for regression debugging, smoke tests, captured MCP fixtures, and CI assertions with `--fail-on-error` or `--max-latency-ms`.
 
 ## Configuration
 
@@ -116,9 +116,12 @@ Use export plus replay for regression debugging, smoke tests, and captured MCP f
 | `--retain-for` | `168h` | Age-based trace retention. Use `0` to disable. |
 | `--max-traces` | `5000` | Count-based retention limit. Use `0` to disable. |
 | `--redact-key` | common secret fields | JSON field name to redact before logs, storage, and dashboard output. Repeatable. |
+| `--workspace` | `default` | Logical workspace for multi-project separation inside one deployment. |
 | `--environment` | `default` | Logical environment for traces, alerts, stats, export, and replay. |
 | `--auth-token` | none | Bearer token required for dashboard APIs and SSE when set. |
 | `--notify-webhook` | none | Webhook URL that receives alert transition events. Repeatable. |
+| `--notify-slack-webhook` | none | Slack webhook URL that receives alert transition events. Repeatable. |
+| `--notify-pagerduty-key` | none | PagerDuty routing key that receives alert transition events. Repeatable. |
 
 Both `proxy` and `snapshot` accept launch commands after `--`, which is the preferred way to run servers that need arguments such as `uv run server.py` or `node server.js`.
 
@@ -128,10 +131,16 @@ Both `proxy` and `snapshot` accept launch commands after `--`, which is the pref
 
 ```json
 {
+  "version": 1,
+  "workspace": "acme",
   "environment": "prod",
   "authToken": "replace-me",
   "notification": {
-    "webhookUrls": ["https://example.com/mcpscope-alerts"]
+    "webhookUrls": ["https://example.com/mcpscope-alerts"],
+    "slackWebhookUrls": ["https://hooks.slack.com/services/replace/me"],
+    "pagerDutyRoutingKeys": ["replace-me"],
+    "retryMaxAttempts": 3,
+    "retryBackoffSeconds": 2
   },
   "proxy": {
     "db": "/data/mcpscope.db",
@@ -146,6 +155,8 @@ Both `proxy` and `snapshot` accept launch commands after `--`, which is the pref
 ```
 
 Flags override config file values.
+
+The JSON schema is versioned. Current supported value: `"version": 1`.
 
 ## Architecture
 

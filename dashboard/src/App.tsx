@@ -20,6 +20,7 @@ type AlertRuleType = 'error_rate' | 'latency_p95'
 type TraceRecord = {
   id: string
   trace_id: string
+  workspace: string
   environment: string
   server_name: string
   method: string
@@ -49,6 +50,7 @@ type LatencyStatRecord = {
 }
 
 type ErrorStatRecord = {
+  workspace: string
   environment: string
   method: string
   count: number
@@ -60,6 +62,7 @@ type ErrorStatRecord = {
 
 type AlertRule = {
   id: string
+  workspace: string
   environment: string
   name: string
   rule_type: AlertRuleType
@@ -87,6 +90,7 @@ type AlertEvaluation = {
 type AlertEvent = {
   id: string
   rule_id: string
+  workspace: string
   environment: string
   rule_name: string
   status: string
@@ -119,6 +123,7 @@ function App() {
   const [selectedServer, setSelectedServer] = useState<string>('')
   const [methodFilter, setMethodFilter] = useState<string>('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
+  const [workspace, setWorkspace] = useState(() => readStoredValue('mcpscope.workspace', 'default'))
   const [environment, setEnvironment] = useState(() => readStoredValue('mcpscope.environment', 'default'))
   const [authToken, setAuthToken] = useState(() => readStoredValue('mcpscope.authToken', ''))
 
@@ -144,6 +149,10 @@ function App() {
   })
 
   useEffect(() => {
+    window.localStorage.setItem('mcpscope.workspace', workspace)
+  }, [workspace])
+
+  useEffect(() => {
     window.localStorage.setItem('mcpscope.environment', environment)
   }, [environment])
 
@@ -158,6 +167,7 @@ function App() {
       const response = await apiFetch(
         apiURL('/api/traces', authToken, {
           environment,
+          workspace,
           server: selectedServer,
           method: methodFilter,
           status: statusFilter,
@@ -188,8 +198,9 @@ function App() {
     })
 
     const source = new EventSource(
-      apiURL('/events', authToken, {
-        environment,
+        apiURL('/events', authToken, {
+          workspace,
+          environment,
         server: selectedServer,
         method: methodFilter,
         status: statusFilter,
@@ -221,7 +232,7 @@ function App() {
       active = false
       source.close()
     }
-  }, [authToken, environment, selectedServer, methodFilter, statusFilter])
+  }, [authToken, workspace, environment, selectedServer, methodFilter, statusFilter])
 
   useEffect(() => {
     let active = true
@@ -232,6 +243,7 @@ function App() {
           apiFetch(
             apiURL('/api/stats/latency', authToken, {
               environment,
+              workspace,
               window: windowKey,
               server: selectedServer,
               method: methodFilter,
@@ -241,15 +253,16 @@ function App() {
           apiFetch(
             apiURL('/api/stats/errors', authToken, {
               environment,
+              workspace,
               window: windowKey,
               server: selectedServer,
               method: methodFilter,
             }),
             authToken,
           ),
-          apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken),
-          apiFetch(apiURL('/api/alerts/evaluations', authToken, { environment }), authToken),
-          apiFetch(apiURL('/api/alerts/events', authToken, { environment }), authToken),
+          apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken),
+          apiFetch(apiURL('/api/alerts/evaluations', authToken, { workspace, environment }), authToken),
+          apiFetch(apiURL('/api/alerts/events', authToken, { workspace, environment }), authToken),
         ])
 
       const [latencyData, errorData, rules, evaluations, events] = (await Promise.all([
@@ -297,7 +310,7 @@ function App() {
       active = false
       window.clearInterval(interval)
     }
-  }, [authToken, environment, selectedServer, windowKey, methodFilter])
+  }, [authToken, workspace, environment, selectedServer, windowKey, methodFilter])
 
   const stats = useMemo(() => {
     const total = traces.length
@@ -353,6 +366,7 @@ function App() {
       const response = await apiFetch(
         apiURL('/api/traces', authToken, {
           environment,
+          workspace,
           server: selectedServer,
           method: methodFilter,
           status: statusFilter,
@@ -375,9 +389,9 @@ function App() {
 
   const refreshAlerts = async () => {
     const [rulesResponse, evaluationsResponse, eventsResponse] = await Promise.all([
-      apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken),
-      apiFetch(apiURL('/api/alerts/evaluations', authToken, { environment }), authToken),
-      apiFetch(apiURL('/api/alerts/events', authToken, { environment }), authToken),
+      apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken),
+      apiFetch(apiURL('/api/alerts/evaluations', authToken, { workspace, environment }), authToken),
+      apiFetch(apiURL('/api/alerts/events', authToken, { workspace, environment }), authToken),
     ])
 
     setAlertRules((await rulesResponse.json()) as AlertRule[])
@@ -387,10 +401,11 @@ function App() {
 
   const saveAlertRule = async () => {
     try {
-      const response = await apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken, {
+      const response = await apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          workspace,
           environment,
           name: alertDraft.name,
           rule_type: alertDraft.rule_type,
@@ -423,7 +438,7 @@ function App() {
   const deleteAlertRule = async (id: string) => {
     try {
       const response = await apiFetch(
-        apiURL('/api/alerts/rules', authToken, { environment, id }),
+        apiURL('/api/alerts/rules', authToken, { workspace, environment, id }),
         authToken,
         { method: 'DELETE' },
       )
@@ -447,6 +462,11 @@ function App() {
         </div>
 
         <div className="controls">
+          <label>
+            <span>Workspace</span>
+            <input value={workspace} onChange={(event) => setWorkspace(event.target.value || 'default')} />
+          </label>
+
           <label>
             <span>Environment</span>
             <input value={environment} onChange={(event) => setEnvironment(event.target.value || 'default')} />
@@ -524,6 +544,10 @@ function App() {
       <section className="hero">
         <div className="status-panel">
           <div>
+            <span>Workspace</span>
+            <strong>{workspace || 'default'}</strong>
+          </div>
+          <div>
             <span>Environment</span>
             <strong>{environment || 'default'}</strong>
           </div>
@@ -561,6 +585,7 @@ function App() {
               className="load-more export-link"
               href={apiURL('/api/export/traces', authToken, {
                 environment,
+                workspace,
                 server: selectedServer,
                 method: methodFilter,
                 status: statusFilter,
@@ -575,6 +600,7 @@ function App() {
               <thead>
                 <tr>
                   <th>Timestamp</th>
+                  <th>Workspace</th>
                   <th>Environment</th>
                   <th>Server</th>
                   <th>Method</th>
@@ -585,7 +611,7 @@ function App() {
               <tbody>
                 {traces.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="empty">
+                    <td colSpan={7} className="empty">
                       No traces yet. Start calling tools through the proxy to populate the feed.
                     </td>
                   </tr>
@@ -601,6 +627,7 @@ function App() {
                           }
                         >
                           <td>{formatTimestamp(trace.created_at)}</td>
+                          <td>{trace.workspace}</td>
                           <td>{trace.environment}</td>
                           <td>{trace.server_name}</td>
                           <td>{trace.method || '(response)'}</td>
@@ -613,7 +640,7 @@ function App() {
                         </tr>
                         {expanded ? (
                           <tr className="detail-row">
-                            <td colSpan={6}>
+                            <td colSpan={7}>
                               <div className="detail-grid">
                                 <div>
                                   <h3>Params</h3>

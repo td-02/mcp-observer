@@ -1,10 +1,14 @@
 {
+  "version": 1,
+  "workspace": "acme",
   "environment": "prod",
   "authToken": "replace-me",
   "notification": {
-    "webhookUrls": [
-      "https://example.com/mcpscope-alerts"
-    ]
+    "webhookUrls": ["https://example.com/mcpscope-alerts"],
+    "slackWebhookUrls": ["https://hooks.slack.com/services/replace/me"],
+    "pagerDutyRoutingKeys": ["replace-me"],
+    "retryMaxAttempts": 3,
+    "retryBackoffSeconds": 2
   },
   "proxy": {
     "db": "/data/mcpscope.db",
