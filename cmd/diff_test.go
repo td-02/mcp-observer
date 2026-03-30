@@ -48,7 +48,7 @@ func TestCompareSnapshotsRemovedToolIsBreaking(t *testing.T) {
 	if len(diff.Removed) != 1 || diff.Removed[0].Name != "alpha" {
 		t.Fatalf("unexpected removed diff: %+v", diff.Removed)
 	}
-	if !hasBreakingChanges(baseline, diff) {
+	if !hasBreakingChanges(baseline, current, diff) {
 		t.Fatalf("expected removed tool to be breaking")
 	}
 }
@@ -97,8 +97,80 @@ func TestCompareSnapshotsChangedSchemaFields(t *testing.T) {
 	if len(changed.ChangedFields) != 1 || changed.ChangedFields[0] != "name" {
 		t.Fatalf("unexpected changed fields: %+v", changed.ChangedFields)
 	}
-	if !hasBreakingChanges(baseline, diff) {
+	if !hasBreakingChanges(baseline, current, diff) {
 		t.Fatalf("expected required field type change to be breaking")
+	}
+}
+
+func TestCompareSnapshotsAddedRequiredFieldIsBreaking(t *testing.T) {
+	t.Parallel()
+
+	baseline := snapshotOutput{
+		Tools: []snapshotTool{
+			testTool("alpha", map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			}),
+		},
+	}
+
+	current := snapshotOutput{
+		Tools: []snapshotTool{
+			testTool("alpha", map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":  map[string]any{"type": "string"},
+					"email": map[string]any{"type": "string"},
+				},
+				"required": []string{"email"},
+			}),
+		},
+	}
+
+	diff := compareSnapshots(baseline, current)
+	if len(diff.Changed) != 1 {
+		t.Fatalf("expected one changed tool, got %+v", diff.Changed)
+	}
+	if !hasBreakingChanges(baseline, current, diff) {
+		t.Fatalf("expected new required field to be breaking")
+	}
+}
+
+func TestCompareSnapshotsOptionalFieldBecomesRequiredIsBreaking(t *testing.T) {
+	t.Parallel()
+
+	baseline := snapshotOutput{
+		Tools: []snapshotTool{
+			testTool("alpha", map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+			}),
+		},
+	}
+
+	current := snapshotOutput{
+		Tools: []snapshotTool{
+			testTool("alpha", map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+				"required": []string{"name"},
+			}),
+		},
+	}
+
+	diff := compareSnapshots(baseline, current)
+	if len(diff.Changed) != 1 {
+		t.Fatalf("expected one changed tool, got %+v", diff.Changed)
+	}
+	if got := diff.Changed[0].NewRequired; len(got) != 1 || got[0] != "name" {
+		t.Fatalf("unexpected new required fields: %+v", got)
+	}
+	if !hasBreakingChanges(baseline, current, diff) {
+		t.Fatalf("expected optional to required change to be breaking")
 	}
 }
 

@@ -40,6 +40,14 @@ go install github.com/YOUR_USERNAME/mcpscope@latest
 mcpscope proxy --server ./your-mcp-server --db traces.db
 ```
 
+```bash
+mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080 --db traces.db
+```
+
+```bash
+mcpscope proxy --transport stdio -- uv run server.py
+```
+
 ```text
 http://localhost:4444
 ```
@@ -48,6 +56,10 @@ http://localhost:4444
 
 ```bash
 mcpscope snapshot --server ./your-mcp-server --output baseline.json
+```
+
+```bash
+mcpscope snapshot -- uv run server.py --output baseline.json
 ```
 
 ```bash
@@ -100,12 +112,15 @@ examples/github-actions/mcp-schema-check.yml
 
 | Flag | Env var | Default | Description |
 | --- | --- | --- | --- |
-| `--server` |  | none | Path to the target MCP server binary or HTTP URL. |
+| `--server` |  | none | Path to the target MCP server binary. `snapshot` also accepts HTTP URLs. |
+| `--upstream-url` |  | none | HTTP URL for an already running MCP server when `proxy --transport http` is used. |
 | `--port` |  | `4444` | Port used by the built-in HTTP server and HTTP proxy mode. |
 | `--db` |  | `mcpscope.db` | SQLite database path used for persisted traces. |
 | `--transport` |  | `stdio` | MCP transport mode for the proxy: `stdio` or `http`. |
 | `--otel` |  | `false` | Explicitly enables OpenTelemetry span export. |
 |  | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC endpoint for trace export; when unset, mcpscope falls back to a no-op exporter silently. |
+
+Both `proxy` and `snapshot` also accept launch commands after `--`, which is the preferred way to run servers that need arguments such as `uv run server.py` or `node server.js`.
 
 ## Roadmap
 

@@ -27,21 +27,24 @@ import (
 )
 
 type Config struct {
-	Server     string
-	ServerName string
-	Port       int
-	Transport  string
-	Store      store.TraceStore
-	Telemetry  *telemetry.Client
-	Dashboard  fs.FS
-	eventHub   *traceEventHub
-	Stdin      io.Reader
-	Stdout     io.Writer
-	Stderr     io.Writer
+	ServerCommand []string
+	UpstreamURL   string
+	ServerName    string
+	Port          int
+	Transport     string
+	Store         store.TraceStore
+	Telemetry     *telemetry.Client
+	Dashboard     fs.FS
+	eventHub      *traceEventHub
+	tracker       *traceTracker
+	Stdin         io.Reader
+	Stdout        io.Writer
+	Stderr        io.Writer
 }
 
 func Run(ctx context.Context, cfg Config) error {
 	cfg.eventHub = newTraceEventHub()
+	cfg.tracker = newTraceTracker()
 
 	switch cfg.Transport {
 	case "stdio":
@@ -89,6 +92,80 @@ type traceEventHub struct {
 	subscribers map[chan traceAPIRecord]struct{}
 }
 
+type pendingTrace struct {
+	id         string
+	traceID    string
+	server     string
+	method     string
+	params     json.RawMessage
+	paramsHash string
+	createdAt  time.Time
+}
+
+type traceTracker struct {
+	mu      sync.Mutex
+	pending map[string]pendingTrace
+}
+
+func newTraceTracker() *traceTracker {
+	return &traceTracker{pending: make(map[string]pendingTrace)}
+}
+
+func (t *traceTracker) Record(serverName string, event intercept.Event) (traceAPIRecord, bool) {
+	if t == nil {
+		return traceRecordFromEvent(intercept.NewUUID(), serverName, event), true
+	}
+
+	now := time.Unix(0, event.ReceivedAtUnixN).UTC()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.evictStaleLocked(now)
+
+	messageID := intercept.MessageIDKey(event.ID)
+	if event.Direction == "client_to_server" && event.Method != "" && messageID != "" {
+		t.pending[messageID] = pendingTrace{
+			id:         intercept.NewUUID(),
+			traceID:    event.TraceID,
+			server:     serverName,
+			method:     event.Method,
+			params:     cloneRawMessage(event.Params),
+			paramsHash: event.ParamsHash,
+			createdAt:  time.Unix(0, event.ReceivedAtUnixN).UTC(),
+		}
+		return traceAPIRecord{}, false
+	}
+
+	if event.Direction == "server_to_client" && messageID != "" {
+		if request, ok := t.pending[messageID]; ok {
+			delete(t.pending, messageID)
+			return traceAPIRecord{
+				ID:           request.id,
+				TraceID:      request.traceID,
+				ServerName:   request.server,
+				Method:       request.method,
+				Params:       cloneRawMessage(request.params),
+				Response:     cloneRawMessage(selectResponsePayload(event)),
+				LatencyMs:    maxDurationMs(request.createdAt, time.Unix(0, event.SentAtUnixN).UTC()),
+				IsError:      event.IsError,
+				ErrorMessage: event.ErrorMessage,
+				CreatedAt:    request.createdAt,
+			}, true
+		}
+	}
+
+	return traceRecordFromEvent(intercept.NewUUID(), serverName, event), true
+}
+
+func (t *traceTracker) evictStaleLocked(now time.Time) {
+	cutoff := now.Add(-15 * time.Minute)
+	for key, trace := range t.pending {
+		if trace.createdAt.Before(cutoff) {
+			delete(t.pending, key)
+		}
+	}
+}
+
 func newTraceEventHub() *traceEventHub {
 	return &traceEventHub{subscribers: make(map[chan traceAPIRecord]struct{})}
 }
@@ -125,7 +202,12 @@ func runStdio(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, cfg.Server)
+	if len(cfg.ServerCommand) == 0 {
+		shutdownHTTPServer(server)
+		return errors.New("missing stdio server command")
+	}
+
+	cmd := exec.CommandContext(ctx, cfg.ServerCommand[0], cfg.ServerCommand[1:]...)
 	cmd.Stderr = cfg.Stderr
 	cmd.Env = append(os.Environ(), fmt.Sprintf("MCPSCOPE_PROXY_PORT=%d", cfg.Port))
 
@@ -273,21 +355,38 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, cfg.Server)
-	cmd.Stdout = cfg.Stderr
-	cmd.Stderr = cfg.Stderr
-	cmd.Env = append(
-		os.Environ(),
-		fmt.Sprintf("PORT=%d", upstreamPort),
-		fmt.Sprintf("MCPSCOPE_PROXY_PORT=%d", cfg.Port),
-		fmt.Sprintf("MCPSCOPE_UPSTREAM_PORT=%d", upstreamPort),
-	)
+	targetURL := strings.TrimSpace(cfg.UpstreamURL)
+	var cmd *exec.Cmd
+	var waitErr <-chan error
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start subprocess: %w", err)
+	if targetURL == "" {
+		if len(cfg.ServerCommand) == 0 {
+			return errors.New("missing http server command")
+		}
+
+		cmd = exec.CommandContext(ctx, cfg.ServerCommand[0], cfg.ServerCommand[1:]...)
+		cmd.Stdout = cfg.Stderr
+		cmd.Stderr = cfg.Stderr
+		cmd.Env = append(
+			os.Environ(),
+			fmt.Sprintf("PORT=%d", upstreamPort),
+			fmt.Sprintf("MCPSCOPE_PROXY_PORT=%d", cfg.Port),
+			fmt.Sprintf("MCPSCOPE_UPSTREAM_PORT=%d", upstreamPort),
+		)
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start subprocess: %w", err)
+		}
+
+		targetURL = fmt.Sprintf("http://127.0.0.1:%d", upstreamPort)
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- cmd.Wait()
+		}()
+		waitErr = waitCh
 	}
 
-	targetBaseURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", upstreamPort))
+	targetBaseURL, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("build upstream url: %w", err)
 	}
@@ -356,10 +455,14 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	waitErr := make(chan error, 1)
-	go func() {
-		waitErr <- cmd.Wait()
-	}()
+	if waitErr == nil {
+		waitCh := make(chan error, 1)
+		go func() {
+			<-ctx.Done()
+			waitCh <- nil
+		}()
+		waitErr = waitCh
+	}
 
 	select {
 	case err := <-serverErr:
@@ -389,12 +492,15 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		return err
 	}
 
-	if cfg.Telemetry != nil {
-		cfg.Telemetry.RecordCall(ctx, cfg.ServerName, event)
+	record, persist := cfg.tracker.Record(cfg.ServerName, event)
+	if !persist {
+		return nil
 	}
 
-	recordID := intercept.NewUUID()
-	record := traceRecordFromEvent(recordID, cfg.ServerName, event)
+	if cfg.Telemetry != nil {
+		cfg.Telemetry.RecordCall(ctx, record.ServerName, eventFromRecord(record))
+	}
+
 	if cfg.eventHub != nil {
 		cfg.eventHub.Publish(record)
 	}
@@ -404,18 +510,18 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	}
 
 	if err := cfg.Store.Insert(ctx, store.Trace{
-		ID:              recordID,
-		TraceID:         event.TraceID,
-		ServerName:      cfg.ServerName,
-		Method:          event.Method,
-		ParamsHash:      event.ParamsHash,
-		ParamsPayload:   rawMessageString(event.Params),
-		ResponseHash:    event.ResponseHash,
-		ResponsePayload: rawMessageString(selectResponsePayload(event)),
-		LatencyMs:       event.LatencyMs,
-		IsError:         event.IsError,
-		ErrorMessage:    event.ErrorMessage,
-		CreatedAt:       time.Unix(0, event.ReceivedAtUnixN).UTC(),
+		ID:              record.ID,
+		TraceID:         record.TraceID,
+		ServerName:      record.ServerName,
+		Method:          record.Method,
+		ParamsHash:      hashRawMessage(record.Params),
+		ParamsPayload:   rawMessageString(record.Params),
+		ResponseHash:    hashRawMessage(record.Response),
+		ResponsePayload: rawMessageString(record.Response),
+		LatencyMs:       record.LatencyMs,
+		IsError:         record.IsError,
+		ErrorMessage:    record.ErrorMessage,
+		CreatedAt:       record.CreatedAt.UTC(),
 	}); err != nil {
 		return err
 	}
@@ -738,6 +844,29 @@ func cloneRawMessage(raw json.RawMessage) json.RawMessage {
 	out := make([]byte, len(raw))
 	copy(out, raw)
 	return out
+}
+
+func hashRawMessage(raw json.RawMessage) string {
+	return intercept.HashRaw(raw)
+}
+
+func eventFromRecord(record traceAPIRecord) intercept.Event {
+	return intercept.Event{
+		TraceID:         record.TraceID,
+		ReceivedAtUnixN: record.CreatedAt.UnixNano(),
+		SentAtUnixN:     record.CreatedAt.Add(time.Duration(record.LatencyMs) * time.Millisecond).UnixNano(),
+		LatencyMs:       record.LatencyMs,
+		Method:          record.Method,
+		IsError:         record.IsError,
+		ErrorMessage:    record.ErrorMessage,
+	}
+}
+
+func maxDurationMs(start, end time.Time) int64 {
+	if end.Before(start) {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
 }
 
 func queryWindowedTraces(r *http.Request, cfg Config) ([]store.Trace, error) {

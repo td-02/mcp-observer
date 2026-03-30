@@ -75,14 +75,15 @@ func newSnapshotCmd() *cobra.Command {
 	var format string
 
 	cmd := &cobra.Command{
-		Use:   "snapshot",
+		Use:   "snapshot [command...]",
 		Short: "Capture an MCP server tool schema snapshot",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if strings.TrimSpace(server) == "" {
-				return errors.New("--server is required")
+			target, err := resolveSnapshotTarget(server, args)
+			if err != nil {
+				return err
 			}
 
-			snapshot, err := createSnapshot(cmd.Context(), server)
+			snapshot, err := createSnapshot(cmd.Context(), target)
 			if err != nil {
 				return err
 			}
@@ -115,23 +116,54 @@ func newSnapshotCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&server, "server", "", "Path to the MCP server binary or an HTTP URL")
+	cmd.Flags().StringVar(&server, "server", "", "Path to the MCP server binary or an HTTP URL. Use `-- <command> <args...>` to include arguments")
 	cmd.Flags().StringVar(&outputPath, "output", "", "Path to write the snapshot JSON file")
 	cmd.Flags().StringVar(&format, "format", "", "Optional output format. Use \"pretty\" to print a tool summary to stderr")
 
 	return cmd
 }
 
-func createSnapshot(ctx context.Context, server string) (snapshotOutput, error) {
-	if isHTTPServer(server) {
-		return snapshotFromHTTP(ctx, server)
-	}
-
-	return snapshotFromStdio(ctx, server)
+type snapshotTarget struct {
+	command []string
+	url     string
 }
 
-func snapshotFromStdio(ctx context.Context, server string) (snapshotOutput, error) {
-	cmd := exec.CommandContext(ctx, server)
+func resolveSnapshotTarget(server string, args []string) (snapshotTarget, error) {
+	server = strings.TrimSpace(server)
+
+	if len(args) > 0 && server != "" {
+		return snapshotTarget{}, errors.New("use either --server or a command after `--`, not both")
+	}
+
+	if len(args) > 0 {
+		return snapshotTarget{command: append([]string(nil), args...)}, nil
+	}
+
+	if server == "" {
+		return snapshotTarget{}, errors.New("provide --server or a command after `--`")
+	}
+
+	if isHTTPServer(server) {
+		return snapshotTarget{url: server}, nil
+	}
+
+	return snapshotTarget{command: []string{server}}, nil
+}
+
+func createSnapshot(ctx context.Context, target snapshotTarget) (snapshotOutput, error) {
+	if target.url != "" {
+		return snapshotFromHTTP(ctx, target.url)
+	}
+
+	return snapshotFromStdio(ctx, target.command)
+}
+
+func snapshotFromStdio(ctx context.Context, command []string) (snapshotOutput, error) {
+	if len(command) == 0 {
+		return snapshotOutput{}, errors.New("missing snapshot command")
+	}
+
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	return snapshotFromCommand(ctx, cmd)
 }
 

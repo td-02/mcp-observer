@@ -72,3 +72,79 @@ func TestValidateTransport(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveProxyTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		server      string
+		upstreamURL string
+		transport   string
+		args        []string
+		wantCommand []string
+		wantURL     string
+		wantErr     bool
+	}{
+		{
+			name:        "stdio command via args",
+			transport:   "stdio",
+			args:        []string{"uv", "run", "server.py"},
+			wantCommand: []string{"uv", "run", "server.py"},
+		},
+		{
+			name:        "http upstream url",
+			transport:   "http",
+			upstreamURL: "http://127.0.0.1:9000",
+			wantURL:     "http://127.0.0.1:9000",
+		},
+		{
+			name:      "http url through server flag",
+			server:    "http://127.0.0.1:9000",
+			transport: "http",
+			wantURL:   "http://127.0.0.1:9000",
+		},
+		{
+			name:      "conflicting server and args",
+			server:    "server.exe",
+			transport: "stdio",
+			args:      []string{"node", "server.js"},
+			wantErr:   true,
+		},
+		{
+			name:        "upstream with stdio",
+			upstreamURL: "http://127.0.0.1:9000",
+			transport:   "stdio",
+			wantErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := resolveProxyTarget(tc.server, tc.upstreamURL, tc.transport, tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.upstreamURL != tc.wantURL {
+				t.Fatalf("upstreamURL = %q, want %q", got.upstreamURL, tc.wantURL)
+			}
+			if len(got.command) != len(tc.wantCommand) {
+				t.Fatalf("command = %v, want %v", got.command, tc.wantCommand)
+			}
+			for i := range got.command {
+				if got.command[i] != tc.wantCommand[i] {
+					t.Fatalf("command = %v, want %v", got.command, tc.wantCommand)
+				}
+			}
+		})
+	}
+}

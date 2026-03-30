@@ -24,6 +24,8 @@ type changedToolDiff struct {
 	AddedFields   []string `json:"addedFields"`
 	RemovedFields []string `json:"removedFields"`
 	ChangedFields []string `json:"changedFields"`
+	NewRequired   []string `json:"newRequired,omitempty"`
+	NoLongerReq   []string `json:"noLongerRequired,omitempty"`
 }
 
 func init() {
@@ -68,7 +70,7 @@ func newDiffCmd() *cobra.Command {
 				}
 			}
 
-			if exitCode && hasBreakingChanges(baseline, diff) {
+			if exitCode && hasBreakingChanges(baseline, current, diff) {
 				return exitCodeError{code: 1, err: errors.New("breaking schema changes detected")}
 			}
 
@@ -128,7 +130,7 @@ func compareSnapshots(baseline, current snapshotOutput) diffOutput {
 		}
 
 		changed := compareToolSchemas(baseTool, currentTool)
-		if len(changed.AddedFields) == 0 && len(changed.RemovedFields) == 0 && len(changed.ChangedFields) == 0 {
+		if len(changed.AddedFields) == 0 && len(changed.RemovedFields) == 0 && len(changed.ChangedFields) == 0 && len(changed.NewRequired) == 0 && len(changed.NoLongerReq) == 0 {
 			continue
 		}
 
@@ -162,6 +164,12 @@ func compareToolSchemas(baseline, current snapshotTool) changedToolDiff {
 		if base.Type != currentField.Type {
 			diff.ChangedFields = append(diff.ChangedFields, field)
 		}
+		if !base.Required && currentField.Required {
+			diff.NewRequired = append(diff.NewRequired, field)
+		}
+		if base.Required && !currentField.Required {
+			diff.NoLongerReq = append(diff.NoLongerReq, field)
+		}
 	}
 
 	for field := range currentFields {
@@ -173,6 +181,8 @@ func compareToolSchemas(baseline, current snapshotTool) changedToolDiff {
 	sort.Strings(diff.AddedFields)
 	sort.Strings(diff.RemovedFields)
 	sort.Strings(diff.ChangedFields)
+	sort.Strings(diff.NewRequired)
+	sort.Strings(diff.NoLongerReq)
 
 	return diff
 }
@@ -217,7 +227,7 @@ func flattenSchemaNode(prefix string, node map[string]any, parentRequired bool, 
 	}
 }
 
-func hasBreakingChanges(baseline snapshotOutput, diff diffOutput) bool {
+func hasBreakingChanges(baseline, current snapshotOutput, diff diffOutput) bool {
 	if len(diff.Removed) > 0 {
 		return true
 	}
@@ -226,9 +236,14 @@ func hasBreakingChanges(baseline snapshotOutput, diff diffOutput) bool {
 	for _, tool := range baseline.Tools {
 		baselineMap[tool.Name] = tool
 	}
+	currentMap := make(map[string]snapshotTool, len(current.Tools))
+	for _, tool := range current.Tools {
+		currentMap[tool.Name] = tool
+	}
 
 	for _, changed := range diff.Changed {
 		baseFields := flattenSchemaFields(baselineMap[changed.Name].InputSchema)
+		currentFields := flattenSchemaFields(currentMap[changed.Name].InputSchema)
 		for _, field := range changed.RemovedFields {
 			if baseFields[field].Required {
 				return true
@@ -236,6 +251,14 @@ func hasBreakingChanges(baseline snapshotOutput, diff diffOutput) bool {
 		}
 		for _, field := range changed.ChangedFields {
 			if baseFields[field].Required {
+				return true
+			}
+		}
+		if len(changed.NewRequired) > 0 {
+			return true
+		}
+		for _, field := range changed.AddedFields {
+			if currentFields[field].Required {
 				return true
 			}
 		}
@@ -274,6 +297,12 @@ func writeDiff(w io.Writer, diff diffOutput) error {
 		}
 		if len(changed.ChangedFields) > 0 {
 			parts = append(parts, "changed: "+strings.Join(changed.ChangedFields, ", "))
+		}
+		if len(changed.NewRequired) > 0 {
+			parts = append(parts, "new required: "+strings.Join(changed.NewRequired, ", "))
+		}
+		if len(changed.NoLongerReq) > 0 {
+			parts = append(parts, "no longer required: "+strings.Join(changed.NoLongerReq, ", "))
 		}
 		if _, err := yellow.Fprintf(w, "~ %s (%s)\n", changed.Name, strings.Join(parts, "; ")); err != nil {
 			return err

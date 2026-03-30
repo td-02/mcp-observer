@@ -41,6 +41,65 @@ func TestCreateSnapshotFromMockStdioServer(t *testing.T) {
 	}
 }
 
+func TestResolveSnapshotTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		server      string
+		args        []string
+		wantURL     string
+		wantCommand []string
+		wantErr     bool
+	}{
+		{
+			name:        "command args",
+			args:        []string{"uv", "run", "server.py"},
+			wantCommand: []string{"uv", "run", "server.py"},
+		},
+		{
+			name:    "http server flag",
+			server:  "http://127.0.0.1:9000",
+			wantURL: "http://127.0.0.1:9000",
+		},
+		{
+			name:    "conflicting inputs",
+			server:  "server.exe",
+			args:    []string{"node", "server.js"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			target, err := resolveSnapshotTarget(tc.server, tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if target.url != tc.wantURL {
+				t.Fatalf("url = %q, want %q", target.url, tc.wantURL)
+			}
+			if len(target.command) != len(tc.wantCommand) {
+				t.Fatalf("command = %v, want %v", target.command, tc.wantCommand)
+			}
+			for i := range target.command {
+				if target.command[i] != tc.wantCommand[i] {
+					t.Fatalf("command = %v, want %v", target.command, tc.wantCommand)
+				}
+			}
+		})
+	}
+}
+
 func TestWritePrettySnapshot(t *testing.T) {
 	t.Parallel()
 

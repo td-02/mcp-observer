@@ -135,6 +135,18 @@ func NewUUID() string {
 	return string(hexBuf)
 }
 
+func MessageIDKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	return string(raw)
+}
+
+func HashRaw(raw json.RawMessage) string {
+	return hashRaw(raw)
+}
+
 func cloneRaw(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
