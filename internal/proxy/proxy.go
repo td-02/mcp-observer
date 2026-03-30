@@ -29,6 +29,7 @@ type Config struct {
 	ServerCommand   []string
 	UpstreamURL     string
 	ServerName      string
+	Workspace       string
 	Environment     string
 	AuthToken       string
 	Port            int
@@ -39,6 +40,10 @@ type Config struct {
 	MaxTraceCount   int
 	RedactKeys      []string
 	NotifyWebhooks  []string
+	SlackWebhooks   []string
+	PagerDutyKeys   []string
+	NotifyRetries   int
+	NotifyBackoff   time.Duration
 	Dashboard       fs.FS
 	eventHub        *traceEventHub
 	tracker         *traceTracker
@@ -52,6 +57,9 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.eventHub = newTraceEventHub()
 	cfg.tracker = newTraceTracker()
 	cfg.redactor = newPayloadRedactor(cfg.RedactKeys)
+	if strings.TrimSpace(cfg.Workspace) == "" {
+		cfg.Workspace = "default"
+	}
 	if strings.TrimSpace(cfg.Environment) == "" {
 		cfg.Environment = "default"
 	}
@@ -69,6 +77,7 @@ func Run(ctx context.Context, cfg Config) error {
 type traceAPIRecord struct {
 	ID           string          `json:"id"`
 	TraceID      string          `json:"trace_id"`
+	Workspace    string          `json:"workspace"`
 	Environment  string          `json:"environment"`
 	ServerName   string          `json:"server_name"`
 	Method       string          `json:"method"`
@@ -517,6 +526,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if !persist {
 		return nil
 	}
+	record.Workspace = cfg.Workspace
 	record.Environment = cfg.Environment
 
 	if cfg.Telemetry != nil {
@@ -534,6 +544,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if err := cfg.Store.Insert(ctx, store.Trace{
 		ID:              record.ID,
 		TraceID:         record.TraceID,
+		Workspace:       cfg.Workspace,
 		Environment:     cfg.Environment,
 		ServerName:      record.ServerName,
 		Method:          record.Method,
@@ -662,6 +673,7 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
+		Workspace:   filter.Workspace,
 		Environment: filter.Environment,
 		ServerName:  filter.ServerName,
 		Method:      filter.Method,
@@ -728,6 +740,9 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 			if filter.ServerName != "" && record.ServerName != filter.ServerName {
 				continue
 			}
+			if filter.Workspace != "" && record.Workspace != filter.Workspace {
+				continue
+			}
 			if filter.Environment != "" && record.Environment != filter.Environment {
 				continue
 			}
@@ -762,9 +777,11 @@ func handleAlertRuleList(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
+	workspace := workspaceFromRequest(r, cfg)
+	environment := environmentFromRequest(r, cfg)
 	filtered := make([]store.AlertRule, 0, len(rules))
 	for _, rule := range rules {
-		if rule.Environment == cfg.Environment {
+		if rule.Workspace == workspace && rule.Environment == environment {
 			filtered = append(filtered, rule)
 		}
 	}
@@ -793,7 +810,10 @@ func handleAlertRuleUpsert(w http.ResponseWriter, r *http.Request, cfg Config) {
 		rule.CreatedAt = time.Now().UTC()
 	}
 	if strings.TrimSpace(rule.Environment) == "" {
-		rule.Environment = cfg.Environment
+		rule.Environment = environmentFromRequest(r, cfg)
+	}
+	if strings.TrimSpace(rule.Workspace) == "" {
+		rule.Workspace = workspaceFromRequest(r, cfg)
 	}
 	rule.UpdatedAt = time.Now().UTC()
 	if rule.CreatedAt.IsZero() {
@@ -839,9 +859,11 @@ func handleAlertEvaluations(w http.ResponseWriter, r *http.Request, cfg Config) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	workspace := workspaceFromRequest(r, cfg)
+	environment := environmentFromRequest(r, cfg)
 	filtered := make([]store.AlertRule, 0, len(rules))
 	for _, rule := range rules {
-		if rule.Environment == cfg.Environment {
+		if rule.Workspace == workspace && rule.Environment == environment {
 			filtered = append(filtered, rule)
 		}
 	}
@@ -861,7 +883,7 @@ func handleAlertEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
-	events, err := cfg.Store.ListAlertEvents(r.Context(), cfg.Environment, 100)
+	events, err := cfg.Store.ListAlertEvents(r.Context(), workspaceFromRequest(r, cfg), environmentFromRequest(r, cfg), 100)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -950,6 +972,7 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
 		TraceID:      filter.TraceID,
+		Workspace:    filter.Workspace,
 		Environment:  filter.Environment,
 		ServerName:   filter.ServerName,
 		Method:       filter.Method,
@@ -996,6 +1019,7 @@ func traceRecordFromEvent(id, serverName string, event intercept.Event) traceAPI
 	return traceAPIRecord{
 		ID:           id,
 		TraceID:      event.TraceID,
+		Workspace:    "",
 		Environment:  "",
 		ServerName:   serverName,
 		Method:       event.Method,
@@ -1012,6 +1036,7 @@ func traceRecordFromStored(trace store.Trace) traceAPIRecord {
 	return traceAPIRecord{
 		ID:           trace.ID,
 		TraceID:      trace.TraceID,
+		Workspace:    trace.Workspace,
 		Environment:  trace.Environment,
 		ServerName:   trace.ServerName,
 		Method:       trace.Method,
@@ -1089,6 +1114,7 @@ func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {
 	start := time.Now().Add(-window)
 
 	return store.QueryFilter{
+		Workspace:    workspaceFromRequest(r, cfg),
 		Environment:  environment,
 		ServerName:   serverName,
 		Method:       method,
@@ -1118,6 +1144,7 @@ func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, 
 
 	filter := store.QueryFilter{
 		TraceID:     strings.TrimSpace(query.Get("trace_id")),
+		Workspace:   workspaceFromRequest(r, cfg),
 		Environment: environmentFromRequest(r, cfg),
 		ServerName:  strings.TrimSpace(query.Get("server")),
 		Method:      strings.TrimSpace(query.Get("method")),
@@ -1146,6 +1173,17 @@ func environmentFromRequest(r *http.Request, cfg Config) string {
 		return "default"
 	}
 	return environment
+}
+
+func workspaceFromRequest(r *http.Request, cfg Config) string {
+	workspace := strings.TrimSpace(r.URL.Query().Get("workspace"))
+	if workspace == "" {
+		workspace = cfg.Workspace
+	}
+	if workspace == "" {
+		return "default"
+	}
+	return workspace
 }
 
 func requireAuth(cfg Config, next http.Handler) http.Handler {

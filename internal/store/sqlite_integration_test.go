@@ -24,6 +24,7 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	trace := Trace{
 		ID:              "550e8400-e29b-41d4-a716-446655440000",
 		TraceID:         "8f14e45f-ea4c-4d57-8b55-6e5d7f1db7b1",
+		Workspace:       "acme",
 		Environment:     "prod",
 		ServerName:      "demo-server",
 		Method:          "tools/call",
@@ -56,6 +57,9 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	if got.TraceID != trace.TraceID {
 		t.Fatalf("trace_id = %q, want %q", got.TraceID, trace.TraceID)
 	}
+	if got.Workspace != trace.Workspace {
+		t.Fatalf("workspace = %q, want %q", got.Workspace, trace.Workspace)
+	}
 	if got.Environment != trace.Environment {
 		t.Fatalf("environment = %q, want %q", got.Environment, trace.Environment)
 	}
@@ -87,7 +91,7 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 		t.Fatalf("error_message = %q, want %q", got.ErrorMessage, trace.ErrorMessage)
 	}
 
-	filtered, err := store.Query(ctx, QueryFilter{TraceID: trace.TraceID, Environment: trace.Environment, Limit: 1})
+	filtered, err := store.Query(ctx, QueryFilter{TraceID: trace.TraceID, Workspace: trace.Workspace, Environment: trace.Environment, Limit: 1})
 	if err != nil {
 		t.Fatalf("Query returned error: %v", err)
 	}
@@ -116,6 +120,7 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 		if err := store.Insert(ctx, Trace{
 			ID:              fmt.Sprintf("trace-%d", i),
 			TraceID:         fmt.Sprintf("correlated-%d", i),
+			Workspace:       "acme",
 			Environment:     "prod",
 			ServerName:      "demo-server",
 			Method:          "tools/call",
@@ -155,6 +160,7 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 
 	rule, err := store.UpsertAlertRule(ctx, AlertRule{
 		ID:            "rule-1",
+		Workspace:     "acme",
 		Environment:   "prod",
 		Name:          "Error budget",
 		RuleType:      "error_rate",
@@ -177,7 +183,7 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 	if len(rules) != 1 || rules[0].Name != "Error budget" {
 		t.Fatalf("unexpected alert rules: %+v", rules)
 	}
-	if rules[0].Environment != "prod" {
+	if rules[0].Workspace != "acme" || rules[0].Environment != "prod" {
 		t.Fatalf("expected prod environment, got %+v", rules[0])
 	}
 
@@ -208,22 +214,22 @@ func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
 	base := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
 	traces := []Trace{
 		{
-			ID: "trace-a", TraceID: "corr-a", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ID: "trace-a", TraceID: "corr-a", Workspace: "acme", Environment: "prod", ServerName: "alpha", Method: "tools/call",
 			ParamsHash: "a", ParamsPayload: `{}`, ResponseHash: "a", ResponsePayload: `{}`,
 			LatencyMs: 20, CreatedAt: base.Add(-4 * time.Minute),
 		},
 		{
-			ID: "trace-b", TraceID: "corr-b", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ID: "trace-b", TraceID: "corr-b", Workspace: "acme", Environment: "prod", ServerName: "alpha", Method: "tools/call",
 			ParamsHash: "b", ParamsPayload: `{}`, ResponseHash: "b", ResponsePayload: `{}`,
 			LatencyMs: 100, IsError: true, ErrorMessage: "boom", CreatedAt: base.Add(-3 * time.Minute),
 		},
 		{
-			ID: "trace-c", TraceID: "corr-c", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ID: "trace-c", TraceID: "corr-c", Workspace: "acme", Environment: "prod", ServerName: "alpha", Method: "tools/call",
 			ParamsHash: "c", ParamsPayload: `{}`, ResponseHash: "c", ResponsePayload: `{}`,
 			LatencyMs: 250, CreatedAt: base.Add(-2 * time.Minute),
 		},
 		{
-			ID: "trace-d", TraceID: "corr-d", Environment: "stage", ServerName: "alpha", Method: "tools/call",
+			ID: "trace-d", TraceID: "corr-d", Workspace: "beta", Environment: "stage", ServerName: "alpha", Method: "tools/call",
 			ParamsHash: "d", ParamsPayload: `{}`, ResponseHash: "d", ResponsePayload: `{}`,
 			LatencyMs: 5, CreatedAt: base.Add(-1 * time.Minute),
 		},
@@ -236,6 +242,7 @@ func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
 
 	start := base.Add(-10 * time.Minute)
 	latency, err := store.QueryLatencyStats(ctx, QueryFilter{
+		Workspace:    "acme",
 		Environment:  "prod",
 		ServerName:   "alpha",
 		Method:       "tools/call",
@@ -252,6 +259,7 @@ func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
 	}
 
 	errors, err := store.QueryErrorStats(ctx, QueryFilter{
+		Workspace:    "acme",
 		Environment:  "prod",
 		Method:       "tools/call",
 		CreatedAfter: &start,
@@ -267,25 +275,29 @@ func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
 	}
 
 	event := AlertEvent{
-		ID:             "event-1",
-		RuleID:         "rule-1",
-		Environment:    "prod",
-		RuleName:       "Prod latency",
-		Status:         "firing",
-		PreviousStatus: "ok",
-		CurrentValue:   250,
-		Threshold:      100,
-		SampleCount:    3,
-		Notification:   "https://example.invalid/webhook",
-		DeliveryStatus: "failed",
-		DeliveryError:  "timeout",
-		CreatedAt:      base,
+		ID:               "event-1",
+		RuleID:           "rule-1",
+		Workspace:        "acme",
+		Environment:      "prod",
+		RuleName:         "Prod latency",
+		Status:           "firing",
+		PreviousStatus:   "ok",
+		CurrentValue:     250,
+		Threshold:        100,
+		SampleCount:      3,
+		Notification:     "https://example.invalid/webhook",
+		DeliveryStatus:   "failed",
+		DeliveryError:    "timeout",
+		DeliveryTarget:   "https://example.invalid/webhook",
+		DeliveryDetail:   "slack webhook",
+		DeliveryAttempts: 3,
+		CreatedAt:        base,
 	}
 	if err := store.InsertAlertEvent(ctx, event); err != nil {
 		t.Fatalf("InsertAlertEvent returned error: %v", err)
 	}
 
-	events, err := store.ListAlertEvents(ctx, "prod", 10)
+	events, err := store.ListAlertEvents(ctx, "acme", "prod", 10)
 	if err != nil {
 		t.Fatalf("ListAlertEvents returned error: %v", err)
 	}
@@ -293,7 +305,7 @@ func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 
-	latest, err := store.LatestAlertEvent(ctx, "prod", "rule-1")
+	latest, err := store.LatestAlertEvent(ctx, "acme", "prod", "rule-1")
 	if err != nil {
 		t.Fatalf("LatestAlertEvent returned error: %v", err)
 	}

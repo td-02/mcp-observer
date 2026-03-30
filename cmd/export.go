@@ -17,6 +17,7 @@ func init() {
 func newExportCmd() *cobra.Command {
 	var dbPath string
 	var outputPath string
+	var workspace string
 	var environment string
 	var limit int
 
@@ -25,6 +26,7 @@ func newExportCmd() *cobra.Command {
 		Short: "Export persisted traces as JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbPath = effectiveString(cmd, "db", dbPath, loadedConfig.Proxy.DB)
+			workspace = defaultWorkspace(effectiveString(cmd, "workspace", workspace, loadedConfig.Workspace))
 			environment = defaultEnvironment(effectiveString(cmd, "environment", environment, loadedConfig.Environment))
 
 			traceStore, err := store.OpenSQLite(cmd.Context(), dbPath)
@@ -34,6 +36,7 @@ func newExportCmd() *cobra.Command {
 			defer traceStore.Close()
 
 			traces, err := traceStore.Query(cmd.Context(), store.QueryFilter{
+				Workspace:   workspace,
 				Environment: environment,
 				Limit:       limit,
 			})
@@ -55,6 +58,7 @@ func newExportCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&dbPath, "db", "mcpscope.db", "SQLite database path for persisted traces")
 	cmd.Flags().StringVar(&outputPath, "output", "", "Path to write exported traces")
+	cmd.Flags().StringVar(&workspace, "workspace", "default", "Workspace to export")
 	cmd.Flags().StringVar(&environment, "environment", "default", "Environment to export")
 	cmd.Flags().IntVar(&limit, "limit", 500, "Maximum number of traces to export")
 

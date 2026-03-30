@@ -1,11 +1,8 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
 	"time"
 
@@ -67,6 +64,7 @@ func evaluateAlertRules(ctx context.Context, traceStore store.TraceStore, now ti
 
 func evaluateAlertRuleSQL(ctx context.Context, traceStore store.TraceStore, rule store.AlertRule, now, start time.Time) (alertEvaluation, error) {
 	filter := store.QueryFilter{
+		Workspace:    rule.Workspace,
 		Environment:  rule.Environment,
 		ServerName:   rule.ServerName,
 		Method:       rule.Method,
@@ -132,7 +130,7 @@ func processAlertEvaluations(ctx context.Context, cfg Config) error {
 
 	filtered := make([]store.AlertRule, 0, len(rules))
 	for _, rule := range rules {
-		if rule.Environment == cfg.Environment {
+		if rule.Workspace == cfg.Workspace && rule.Environment == cfg.Environment {
 			filtered = append(filtered, rule)
 		}
 	}
@@ -143,7 +141,7 @@ func processAlertEvaluations(ctx context.Context, cfg Config) error {
 	}
 
 	for _, evaluation := range evaluations {
-		previous, err := cfg.Store.LatestAlertEvent(ctx, cfg.Environment, evaluation.RuleID)
+		previous, err := cfg.Store.LatestAlertEvent(ctx, cfg.Workspace, cfg.Environment, evaluation.RuleID)
 		if err != nil {
 			return err
 		}
@@ -159,6 +157,7 @@ func processAlertEvaluations(ctx context.Context, cfg Config) error {
 		event := store.AlertEvent{
 			ID:             intercept.NewUUID(),
 			RuleID:         evaluation.RuleID,
+			Workspace:      cfg.Workspace,
 			Environment:    cfg.Environment,
 			RuleName:       evaluation.Name,
 			Status:         evaluation.Status,
@@ -169,7 +168,13 @@ func processAlertEvaluations(ctx context.Context, cfg Config) error {
 			CreatedAt:      evaluation.LastEvaluatedAt,
 		}
 
-		event.Notification, event.DeliveryStatus, event.DeliveryError = deliverAlertNotifications(ctx, cfg.NotifyWebhooks, evaluation)
+		outcome := deliverAlertNotifications(ctx, cfg, evaluation)
+		event.Notification = outcome.Notification
+		event.DeliveryStatus = outcome.Status
+		event.DeliveryError = outcome.Error
+		event.DeliveryTarget = outcome.Target
+		event.DeliveryDetail = outcome.Detail
+		event.DeliveryAttempts = outcome.Attempts
 		if err := cfg.Store.InsertAlertEvent(ctx, event); err != nil {
 			return err
 		}
@@ -236,35 +241,4 @@ func alertSeverity(status string) int {
 	default:
 		return 0
 	}
-}
-
-func deliverAlertNotifications(ctx context.Context, webhooks []string, evaluation alertEvaluation) (string, string, string) {
-	if len(webhooks) == 0 {
-		return "", "skipped", ""
-	}
-
-	payload, err := json.Marshal(evaluation)
-	if err != nil {
-		return "", "failed", err.Error()
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, webhook := range webhooks {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(payload))
-		if err != nil {
-			return webhook, "failed", err.Error()
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return webhook, "failed", err.Error()
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return webhook, "failed", fmt.Sprintf("http %d", resp.StatusCode)
-		}
-	}
-
-	return webhooks[0], "sent", ""
 }

@@ -29,9 +29,12 @@ func newProxyCmd() *cobra.Command {
 	var retainFor string
 	var maxTraces int
 	var redactKeys []string
+	var workspace string
 	var environment string
 	var authToken string
 	var notifyWebhooks []string
+	var slackWebhooks []string
+	var pagerDutyKeys []string
 
 	cmd := &cobra.Command{
 		Use:   "proxy [command...]",
@@ -52,6 +55,7 @@ func newProxyCmd() *cobra.Command {
 					return err
 				}
 			}
+			workspace = effectiveString(cmd, "workspace", workspace, loadedConfig.Workspace)
 			environment = effectiveString(cmd, "environment", environment, loadedConfig.Environment)
 			authToken = effectiveString(cmd, "auth-token", authToken, loadedConfig.AuthToken)
 			retainFor = effectiveString(cmd, "retain-for", retainFor, loadedConfig.Proxy.RetainFor)
@@ -63,6 +67,12 @@ func newProxyCmd() *cobra.Command {
 			}
 			if !cmd.Flags().Changed("notify-webhook") && len(loadedConfig.Notification.WebhookURLs) > 0 {
 				notifyWebhooks = loadedConfig.Notification.WebhookURLs
+			}
+			if !cmd.Flags().Changed("notify-slack-webhook") && len(loadedConfig.Notification.SlackWebhookURLs) > 0 {
+				slackWebhooks = loadedConfig.Notification.SlackWebhookURLs
+			}
+			if !cmd.Flags().Changed("notify-pagerduty-key") && len(loadedConfig.Notification.PagerDutyRoutingKeys) > 0 {
+				pagerDutyKeys = loadedConfig.Notification.PagerDutyRoutingKeys
 			}
 			if !cmd.Flags().Changed("otel") && loadedConfig.Proxy.EnableOTEL {
 				enableOTEL = true
@@ -99,6 +109,7 @@ func newProxyCmd() *cobra.Command {
 				ServerName:      target.serverName(),
 				Port:            port,
 				Transport:       normalizedTransport,
+				Workspace:       defaultWorkspace(workspace),
 				Environment:     defaultEnvironment(environment),
 				AuthToken:       strings.TrimSpace(authToken),
 				Store:           traceStore,
@@ -107,6 +118,10 @@ func newProxyCmd() *cobra.Command {
 				MaxTraceCount:   maxTraces,
 				RedactKeys:      normalizeKeys(redactKeys),
 				NotifyWebhooks:  normalizeURLs(notifyWebhooks),
+				SlackWebhooks:   normalizeURLs(slackWebhooks),
+				PagerDutyKeys:   normalizeURLs(pagerDutyKeys),
+				NotifyRetries:   defaultInt(loadedConfig.Notification.RetryMaxAttempts, 3),
+				NotifyBackoff:   time.Duration(defaultInt(loadedConfig.Notification.RetryBackoffSeconds, 2)) * time.Second,
 				Dashboard:       dashboardFS,
 				Stdin:           os.Stdin,
 				Stdout:          os.Stdout,
@@ -124,9 +139,12 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a duration. Use 0 to disable age-based retention")
 	cmd.Flags().IntVar(&maxTraces, "max-traces", 5000, "Maximum number of traces to retain. Use 0 to disable count-based retention")
 	cmd.Flags().StringSliceVar(&redactKeys, "redact-key", []string{"apiKey", "api_key", "authorization", "token", "secret", "password"}, "JSON field names to redact before persistence and logging")
+	cmd.Flags().StringVar(&workspace, "workspace", "default", "Logical workspace name for multi-project separation")
 	cmd.Flags().StringVar(&environment, "environment", "default", "Logical environment name for traces, alerts, and replay/export operations")
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token required for dashboard APIs when set")
 	cmd.Flags().StringSliceVar(&notifyWebhooks, "notify-webhook", nil, "Webhook URL that receives alert state changes. Repeatable")
+	cmd.Flags().StringSliceVar(&slackWebhooks, "notify-slack-webhook", nil, "Slack webhook URL that receives alert state changes. Repeatable")
+	cmd.Flags().StringSliceVar(&pagerDutyKeys, "notify-pagerduty-key", nil, "PagerDuty routing key that receives alert state changes. Repeatable")
 
 	return cmd
 }
@@ -274,4 +292,19 @@ func defaultEnvironment(value string) string {
 		return "default"
 	}
 	return value
+}
+
+func defaultWorkspace(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	return value
+}
+
+func defaultInt(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
 }
