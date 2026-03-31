@@ -18,7 +18,7 @@ Open source observability for MCP servers.
 ## Quick start
 
 ```bash
-go install github.com/YOUR_USERNAME/mcpscope@latest
+go install github.com/td-02/mcpscope@latest
 ```
 
 ```bash
