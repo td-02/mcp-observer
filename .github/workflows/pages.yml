@@ -22,7 +22,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pages-disabled:
+    if: ${{ !github.event.repository.has_pages }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain required repository setting
+        run: |
+          echo "GitHub Pages is not enabled for this repository."
+          echo "Enable it in Settings > Pages and select GitHub Actions as the source."
+          echo "After that, push again or rerun this workflow to deploy docs/."
+
   build:
+    if: ${{ github.event.repository.has_pages }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -30,8 +41,6 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
@@ -39,6 +48,7 @@ jobs:
           path: docs
 
   deploy:
+    if: ${{ github.event.repository.has_pages }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
