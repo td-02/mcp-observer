@@ -1,8 +1,8 @@
 # mcpscope
 
-Open source MCP observability: proxy traffic, inspect traces, replay calls, diff schemas, and alert on failures.
+![mcpscope demo](demo/mcpscope-demo.gif)
 
-![mcpscope demo](demo/mcp_observer_demo.gif)
+Open source MCP observability: proxy traffic, inspect traces, replay calls, diff schemas, and alert on failures.
 
 ## What it does
 
@@ -105,6 +105,18 @@ Verified in this repo with:
 
 - The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist).
 - Rebuilding the Vite dashboard bundle currently needs Node `20.19+` or `22.12+`.
+
+## Contributing
+
+### Regenerating the demo
+
+The demo GIF is fully automated. After making changes to the CLI output or adding features:
+
+```bash
+make demo
+```
+
+This requires `vhs` and `ffmpeg`. See `demo/README.md` for details.
 
 ## License
 

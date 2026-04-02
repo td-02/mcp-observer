@@ -1,0 +1,142 @@
+#!/bin/sh
+
+ROOT=${MCPSCOPE_DEMO_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+
+write_snapshot() {
+  server="$1"
+  output="$2"
+
+  case "$server" in
+    *fake-mcp-server-v2.sh)
+      cat >"$output" <<'EOF'
+{"server_name":"fake-mcp-server-v2","server_version":"0.1.0","tools":[{"name":"read_file","description":"Read a file from disk","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path"}},"required":["path"]},"output_schema":{"type":"string"}},{"name":"search_web","description":"Search the web and return results","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},"output_schema":{"type":"array","items":{"type":"string"}}},{"name":"run_query","description":"Run a database query","input_schema":{"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"]},"output_schema":{"type":"object","properties":{"rows":{"type":"array"}}}},{"name":"write_file","description":"Write data to a file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["path","contents"]},"output_schema":{"type":"boolean"}}]}
+EOF
+      ;;
+    *)
+      cat >"$output" <<'EOF'
+{"server_name":"fake-mcp-server","server_version":"0.1.0","tools":[{"name":"read_file","description":"Read a file from disk","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path"}},"required":["path"]},"output_schema":{"type":"string"}},{"name":"search_web","description":"Search the web and return results","input_schema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","default":10}},"required":["query"]},"output_schema":{"type":"array","items":{"type":"string"}}},{"name":"run_query","description":"Run a database query","input_schema":{"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"]},"output_schema":{"type":"string"}},{"name":"write_file","description":"Write data to a file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["path","contents"]},"output_schema":{"type":"boolean"}}]}
+EOF
+      ;;
+  esac
+}
+
+proxy_banner() {
+  target="$1"
+  db_path="$2"
+  printf '  mcpscope proxy v0.1.0\n'
+  sleep 0.3
+  printf '  ─────────────────────────────────────────\n'
+  sleep 0.3
+  printf '  Transport    stdio\n'
+  sleep 0.3
+  printf '  Target       %s\n' "$target"
+  sleep 0.3
+  printf '  Dashboard    http://localhost:4444\n'
+  sleep 0.3
+  printf '  Trace store  %s\n' "$db_path"
+  sleep 0.3
+  printf '  OTEL         disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)\n'
+  sleep 0.3
+  printf '  ─────────────────────────────────────────\n'
+  sleep 0.3
+  printf '  Proxy ready. Waiting for connections...\n'
+}
+
+proxy_otel() {
+  printf '  OpenTelemetry export → localhost:4317\n'
+  sleep 0.3
+  printf '  Proxy ready.\n'
+  trap 'exit 130' INT
+  while :; do
+    sleep 1
+  done
+}
+
+cmd=$1
+shift 2>/dev/null || true
+
+case "$cmd" in
+  --version)
+    printf 'mcpscope version 0.1.0 (go1.22, MIT)\n'
+    ;;
+  proxy)
+    target="./demo/fake-mcp-server.sh"
+    db_path="/tmp/traces.db"
+    otel_mode=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --server)
+          target=$2
+          shift 2
+          ;;
+        --db)
+          db_path=$2
+          shift 2
+          ;;
+        --otel)
+          otel_mode=1
+          shift
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ "$otel_mode" -eq 1 ]; then
+      proxy_otel
+      exit 0
+    fi
+    proxy_banner "$target" "$db_path"
+    sh "$ROOT/demo/run-agent.sh" "${MCPSCOPE_DEMO_MODE:-full}"
+    ;;
+  snapshot)
+    server=
+    output=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --server)
+          server=$2
+          shift 2
+          ;;
+        --output)
+          output=$2
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ -z "$output" ]; then
+      printf 'snapshot: missing --output\n' >&2
+      exit 1
+    fi
+    write_snapshot "$server" "$output"
+    printf 'snapshot saved to %s\n' "$output"
+    ;;
+  diff)
+    left=$1
+    right=$2
+    if [ -n "$left" ] && [ -n "$right" ] && cmp -s "$left" "$right"; then
+      printf '  mcpscope schema diff\n'
+      printf '  ─────────────────────────────────────────\n'
+      printf '  no breaking changes detected\n'
+      exit 0
+    fi
+    printf '\033[31m  mcpscope schema diff\n'
+    printf '  ─────────────────────────────────────────\n'
+    printf "  BREAKING  search_web   param 'limit' removed\n"
+    printf '  BREAKING  run_query    return schema changed (string → object)\n'
+    printf '  ─────────────────────────────────────────\n'
+    printf '  2 breaking changes detected\n'
+    printf '  Exit code 1\033[0m\n'
+    exit 1
+    ;;
+  *)
+    if [ -n "$MCPSCOPE_REAL_BIN" ] && [ -x "$MCPSCOPE_REAL_BIN" ]; then
+      exec "$MCPSCOPE_REAL_BIN" "$cmd" "$@"
+    fi
+    printf 'mcpscope demo shim: unsupported command %s\n' "$cmd" >&2
+    exit 1
+    ;;
+esac
