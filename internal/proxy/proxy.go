@@ -116,6 +116,13 @@ type errorStatRecord struct {
 	RecentErrorAt      *time.Time `json:"recent_error_at,omitempty"`
 }
 
+type statusResponse struct {
+	Service string          `json:"service"`
+	Status  string          `json:"status"`
+	Ready   bool            `json:"ready"`
+	Checks  map[string]bool `json:"checks,omitempty"`
+}
+
 type traceEventHub struct {
 	mu          sync.RWMutex
 	subscribers map[chan traceAPIRecord]struct{}
@@ -319,9 +326,7 @@ func forwardStdio(ctx context.Context, cfg Config, src io.Reader, dst io.Writer,
 		}
 
 		sentAt := time.Now()
-		if err := captureAndPersist(ctx, cfg, "stdio", direction, receivedAt, sentAt, frame.payload); err != nil {
-			return err
-		}
+		captureAndPersistBestEffort(ctx, cfg, "stdio", direction, receivedAt, sentAt, frame.payload)
 	}
 }
 
@@ -449,10 +454,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		resp, err := client.Do(req)
 		mu.Unlock()
 		requestSentAt := time.Now()
-		if err := captureAndPersist(r.Context(), cfg, "http", "client_to_server", requestReceivedAt, requestSentAt, requestBody); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		captureAndPersistBestEffort(r.Context(), cfg, "http", "client_to_server", requestReceivedAt, requestSentAt, requestBody)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("proxy upstream request: %v", err), http.StatusBadGateway)
 			return
@@ -478,7 +480,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		}
 
 		responseSentAt := time.Now()
-		_ = captureAndPersist(r.Context(), cfg, "http", "server_to_client", responseReceivedAt, responseSentAt, responseBody)
+		captureAndPersistBestEffort(r.Context(), cfg, "http", "server_to_client", responseReceivedAt, responseSentAt, responseBody)
 	})
 	if err != nil {
 		return err
@@ -518,7 +520,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	event := intercept.Capture(transport, direction, receivedAt, sentAt, payload)
 	event = cfg.redactor.Event(event)
 
-	if err := intercept.EmitLog(cfg.Stderr, event); err != nil {
+	if err := intercept.EmitLog(stderrWriter(cfg), event); err != nil {
 		return err
 	}
 
@@ -578,6 +580,26 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	return nil
 }
 
+func captureAndPersistBestEffort(ctx context.Context, cfg Config, transport, direction string, receivedAt, sentAt time.Time, payload []byte) {
+	if err := captureAndPersist(ctx, cfg, transport, direction, receivedAt, sentAt, payload); err != nil {
+		logProxyWarning(cfg.Stderr, "trace capture failed", err)
+	}
+}
+
+func logProxyWarning(stderr io.Writer, message string, err error) {
+	if stderr == nil || err == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr, "mcpscope: %s: %v\n", message, err)
+}
+
+func stderrWriter(cfg Config) io.Writer {
+	if cfg.Stderr != nil {
+		return cfg.Stderr
+	}
+	return io.Discard
+}
+
 func validateUpstreamPort(port int) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("derived upstream port %d is out of range", port)
@@ -627,6 +649,10 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			handleHealthz(w, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/readyz":
+			handleReadyz(w, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/traces":
 			handleTraceList(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/export/traces":
@@ -657,6 +683,49 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 	})
 
 	return requireAuth(cfg, handler)
+}
+
+func handleHealthz(w http.ResponseWriter, cfg Config) {
+	writeStatus(w, http.StatusOK, statusResponse{
+		Service: "mcpscope",
+		Status:  "ok",
+		Ready:   isReady(cfg),
+		Checks:  readinessChecks(cfg),
+	})
+}
+
+func handleReadyz(w http.ResponseWriter, cfg Config) {
+	ready := isReady(cfg)
+	status := "ok"
+	code := http.StatusOK
+	if !ready {
+		status = "not_ready"
+		code = http.StatusServiceUnavailable
+	}
+
+	writeStatus(w, code, statusResponse{
+		Service: "mcpscope",
+		Status:  status,
+		Ready:   ready,
+		Checks:  readinessChecks(cfg),
+	})
+}
+
+func writeStatus(w http.ResponseWriter, statusCode int, value statusResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func isReady(cfg Config) bool {
+	return cfg.Dashboard != nil && cfg.Store != nil
+}
+
+func readinessChecks(cfg Config) map[string]bool {
+	return map[string]bool{
+		"dashboard_embedded": cfg.Dashboard != nil,
+		"trace_store":        cfg.Store != nil,
+	}
 }
 
 func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {

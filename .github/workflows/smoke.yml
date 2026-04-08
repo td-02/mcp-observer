@@ -1,0 +1,111 @@
+name: Smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: npm ci
+        working-directory: dashboard
+
+      - name: Build dashboard assets
+        run: npm run build
+        working-directory: dashboard
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.0"
+
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/mcpscope .
+          go build -o bin/mockhttp ./demo/mockhttp
+
+      - name: Run smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mock_log="$RUNNER_TEMP/mockhttp.log"
+          proxy_log="$RUNNER_TEMP/mcpscope.log"
+          db_path="$RUNNER_TEMP/mcpscope.db"
+          upstream_port=18081
+          proxy_port=18080
+
+          cleanup() {
+            if [[ -n "${proxy_pid:-}" ]]; then
+              kill "$proxy_pid" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${mock_pid:-}" ]]; then
+              kill "$mock_pid" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          PORT="$upstream_port" ./bin/mockhttp >"$mock_log" 2>&1 &
+          mock_pid=$!
+
+          upstream_ready=false
+          for _ in {1..30}; do
+            if curl -fsS "http://127.0.0.1:${upstream_port}/readyz" >/dev/null; then
+              upstream_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$upstream_ready" != true ]]; then
+            echo "mock upstream did not become ready"
+            cat "$mock_log"
+            exit 1
+          fi
+
+          ./bin/mcpscope proxy --transport http --upstream-url "http://127.0.0.1:${upstream_port}" --port "$proxy_port" --db "$db_path" >"$proxy_log" 2>&1 &
+          proxy_pid=$!
+
+          proxy_ready=false
+          for _ in {1..30}; do
+            if curl -fsS "http://127.0.0.1:${proxy_port}/readyz" >/dev/null; then
+              proxy_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$proxy_ready" != true ]]; then
+            echo "mcpscope proxy did not become ready"
+            cat "$proxy_log"
+            exit 1
+          fi
+
+          curl -fsS "http://127.0.0.1:${proxy_port}/healthz" | grep -q '"status":"ok"'
+          curl -fsS "http://127.0.0.1:${proxy_port}/readyz" | grep -q '"ready":true'
+          curl -fsS "http://127.0.0.1:${proxy_port}/" | grep -q 'mcpscope'
+
+          curl -fsS -X POST "http://127.0.0.1:${proxy_port}/" \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"message":"ping"}}' \
+            | grep -q '"result"'
+
+          curl -fsS "http://127.0.0.1:${proxy_port}/api/traces?workspace=default&environment=default" \
+            | grep -q '"method":"tools/call"'

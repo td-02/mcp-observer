@@ -39,6 +39,8 @@ For an existing HTTP MCP server:
 mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080
 ```
 
+For source builds, `make build` and `make test` regenerate the dashboard assets before compiling the Go binary.
+
 ## Common flows
 
 Run with config:
@@ -103,8 +105,10 @@ Verified in this repo with:
 
 ## Notes
 
-- The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist).
+- The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist), which is checked in and embedded at build time.
 - Rebuilding the Vite dashboard bundle currently needs Node `20.19+` or `22.12+`.
+- The HTTP server exposes `/healthz` for liveness and `/readyz` for readiness.
+- CI includes a smoke workflow that builds the packaged binary, starts a mock upstream, and exercises the dashboard and trace APIs end to end.
 
 ## Contributing
 

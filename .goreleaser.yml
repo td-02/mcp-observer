@@ -2,7 +2,8 @@ project_name: mcpscope
 
 before:
   hooks:
-    - go mod tidy
+    - cd dashboard && npm ci
+    - cd dashboard && npm run build
 
 builds:
   - id: mcpscope

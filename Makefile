@@ -2,16 +2,18 @@ APP := mcpscope
 PORT ?= 4444
 TRANSPORT ?= stdio
 
-.PHONY: build test run dashboard demo demo-clean demo-preview
+.PHONY: build test run dashboard dashboard-build demo demo-clean demo-preview
 
-build:
+dashboard-build:
+	cd dashboard && npm ci && npm run build
+
+dashboard: dashboard-build
+
+build: dashboard-build
 	go build ./...
 
-test:
+test: dashboard-build
 	go test ./...
-
-dashboard:
-	cd dashboard && npm run build
 
 run:
 	go run . proxy --server "$(SERVER)" --port "$(PORT)" --transport "$(TRANSPORT)"
