@@ -103,6 +103,84 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreQuerySupportsSearchAndTimeRange(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "traces.db")
+
+	store, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite returned error: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 3, 21, 10, 0, 0, 0, time.UTC)
+	traces := []Trace{
+		{
+			ID: "trace-a", TraceID: "search-alpha", Workspace: "acme", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ParamsHash: "a", ParamsPayload: `{"message":"hello"}`, ResponseHash: "a", ResponsePayload: `{"ok":true}`,
+			LatencyMs: 20, CreatedAt: base,
+		},
+		{
+			ID: "trace-b", TraceID: "search-beta", Workspace: "acme", Environment: "prod", ServerName: "beta", Method: "resources/list",
+			ParamsHash: "b", ParamsPayload: `{"query":"needle"}`, ResponseHash: "b", ResponsePayload: `{"ok":true}`,
+			LatencyMs: 30, CreatedAt: base.Add(2 * time.Minute),
+		},
+	}
+	for _, trace := range traces {
+		if err := store.Insert(ctx, trace); err != nil {
+			t.Fatalf("Insert returned error: %v", err)
+		}
+	}
+
+	searchResults, err := store.Query(ctx, QueryFilter{
+		Workspace:   "acme",
+		Environment: "prod",
+		Search:      "needle",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if len(searchResults) != 1 || searchResults[0].TraceID != "search-beta" {
+		t.Fatalf("unexpected search results: %+v", searchResults)
+	}
+
+	start := base.Add(30 * time.Second)
+	end := base.Add(90 * time.Second)
+	rangedResults, err := store.Query(ctx, QueryFilter{
+		Workspace:     "acme",
+		Environment:   "prod",
+		CreatedAfter:  &start,
+		CreatedBefore: &end,
+		Limit:         10,
+	})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if len(rangedResults) != 0 {
+		t.Fatalf("expected no traces in time range, got %+v", rangedResults)
+	}
+
+	rangedResults, err = store.Query(ctx, QueryFilter{
+		Workspace:    "acme",
+		Environment:  "prod",
+		CreatedAfter: &start,
+		CreatedBefore: func() *time.Time {
+			value := base.Add(3 * time.Minute)
+			return &value
+		}(),
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if len(rangedResults) != 1 || rangedResults[0].TraceID != "search-beta" {
+		t.Fatalf("unexpected ranged results: %+v", rangedResults)
+	}
+}
+
 func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 	t.Parallel()
 

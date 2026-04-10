@@ -43,6 +43,15 @@
   min-width: 11rem;
 }
 
+.controls label.trace-search {
+  min-width: 16rem;
+  flex: 1 1 16rem;
+}
+
+.controls label.date-control {
+  min-width: 12rem;
+}
+
 .controls span {
   font-size: 0.72rem;
   text-transform: uppercase;
@@ -152,6 +161,13 @@
 .panel-header {
   padding: 1.25rem 1.25rem 1rem;
   border-bottom: 1px solid rgba(64, 48, 34, 0.08);
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
 }
 
 .table-header-actions {
@@ -271,6 +287,32 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: #8f7b69;
+}
+
+.alert-form button.load-more {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.alert-enabled {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  align-self: end;
+  padding-top: 1.25rem;
+}
+
+.rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.84rem;
 }
 
 .timeline-item {

@@ -29,6 +29,7 @@ func TestHTTPHandlerWorkspaceScopedAPIs(t *testing.T) {
 	createdAt := time.Date(2026, 3, 31, 10, 0, 0, 0, time.UTC)
 	for _, trace := range []store.Trace{
 		{ID: "1", TraceID: "t1", Workspace: "acme", Environment: "prod", ServerName: "srv", Method: "tools/call", ParamsHash: "a", ParamsPayload: `{}`, ResponseHash: "a", ResponsePayload: `{}`, CreatedAt: createdAt},
+		{ID: "3", TraceID: "t3", Workspace: "acme", Environment: "prod", ServerName: "srv", Method: "tools/call", ParamsHash: "c", ParamsPayload: `{}`, ResponseHash: "c", ResponsePayload: `{}`, CreatedAt: createdAt.Add(2 * time.Second)},
 		{ID: "2", TraceID: "t2", Workspace: "beta", Environment: "prod", ServerName: "srv", Method: "tools/call", ParamsHash: "b", ParamsPayload: `{}`, ResponseHash: "b", ResponsePayload: `{}`, CreatedAt: createdAt.Add(time.Second)},
 	} {
 		if err := traceStore.Insert(ctx, trace); err != nil {
@@ -57,8 +58,36 @@ func TestHTTPHandlerWorkspaceScopedAPIs(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
 	}
-	if len(payload.Items) != 1 || payload.Items[0].Workspace != "acme" {
+	if len(payload.Items) != 2 || payload.Items[0].TraceID != "t3" || payload.Items[1].TraceID != "t1" {
 		t.Fatalf("unexpected traces payload: %+v", payload)
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/traces?workspace=acme&environment=prod&search=t1", nil)
+	searchReq.Header.Set("Authorization", "Bearer secret")
+	searchRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(searchRecorder, searchReq)
+	if searchRecorder.Code != http.StatusOK {
+		t.Fatalf("search status = %d body=%s", searchRecorder.Code, searchRecorder.Body.String())
+	}
+	if err := json.Unmarshal(searchRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].TraceID != "t1" {
+		t.Fatalf("unexpected search payload: %+v", payload)
+	}
+
+	rangeReq := httptest.NewRequest(http.MethodGet, "/api/traces?workspace=acme&environment=prod&created_after="+createdAt.Add(500*time.Millisecond).Format(time.RFC3339Nano), nil)
+	rangeReq.Header.Set("Authorization", "Bearer secret")
+	rangeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(rangeRecorder, rangeReq)
+	if rangeRecorder.Code != http.StatusOK {
+		t.Fatalf("range status = %d body=%s", rangeRecorder.Code, rangeRecorder.Body.String())
+	}
+	if err := json.Unmarshal(rangeRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].TraceID != "t3" {
+		t.Fatalf("unexpected range payload: %+v", payload)
 	}
 
 	exportReq := httptest.NewRequest(http.MethodGet, "/api/export/traces?workspace=acme&environment=prod", nil)
@@ -109,6 +138,31 @@ func TestHTTPHandlerAlertRulesRespectWorkspace(t *testing.T) {
 	}
 	if saved.Workspace != "acme" || saved.Environment != "prod" {
 		t.Fatalf("unexpected saved rule: %+v", saved)
+	}
+
+	updateBody := `{"id":"` + saved.ID + `","name":"High latency","rule_type":"latency_p95","threshold":250,"window_minutes":15,"enabled":false}`
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/alerts/rules?workspace=acme&environment=prod", strings.NewReader(updateBody))
+	updateReq.Header.Set("Authorization", "Bearer secret")
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(updateRecorder, updateReq)
+	if updateRecorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", updateRecorder.Code, updateRecorder.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/alerts/rules?workspace=acme&environment=prod", nil)
+	listReq.Header.Set("Authorization", "Bearer secret")
+	listRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(listRecorder, listReq)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var rules []store.AlertRule
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &rules); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Threshold != 250 || rules[0].Enabled {
+		t.Fatalf("unexpected updated rules: %+v", rules)
 	}
 }
 

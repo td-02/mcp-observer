@@ -76,7 +76,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 		trace.LatencyMs,
 		trace.IsError,
 		trace.ErrorMessage,
-		trace.CreatedAt.UTC(),
+		sqliteTimestamp(trace.CreatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("insert trace: %w", err)
@@ -92,6 +92,18 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 	if filter.TraceID != "" {
 		conditions = append(conditions, "trace_id = ?")
 		args = append(args, filter.TraceID)
+	}
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		conditions = append(conditions, `(
+			trace_id LIKE ? OR
+			server_name LIKE ? OR
+			method LIKE ? OR
+			error_message LIKE ? OR
+			params_payload LIKE ? OR
+			response_payload LIKE ?
+		)`)
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	if filter.Workspace != "" {
 		conditions = append(conditions, "workspace = ?")
@@ -115,7 +127,11 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 	}
 	if filter.CreatedAfter != nil {
 		conditions = append(conditions, "created_at >= ?")
-		args = append(args, filter.CreatedAfter.UTC())
+		args = append(args, sqliteTimestamp(*filter.CreatedAfter))
+	}
+	if filter.CreatedBefore != nil {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, sqliteTimestamp(*filter.CreatedBefore))
 	}
 
 	query := `
@@ -198,7 +214,7 @@ func (s *SQLiteStore) Close() error {
 }
 
 func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM traces WHERE created_at < ?`, cutoff.UTC())
+	_, err := s.db.ExecContext(ctx, `DELETE FROM traces WHERE created_at < ?`, sqliteTimestamp(cutoff))
 	if err != nil {
 		return fmt.Errorf("delete old traces: %w", err)
 	}
@@ -262,8 +278,8 @@ func (s *SQLiteStore) UpsertAlertRule(ctx context.Context, rule AlertRule) (Aler
 		rule.ServerName,
 		rule.Method,
 		boolToInt(rule.Enabled),
-		rule.CreatedAt.UTC(),
-		rule.UpdatedAt.UTC(),
+		sqliteTimestamp(rule.CreatedAt),
+		sqliteTimestamp(rule.UpdatedAt),
 	)
 	if err != nil {
 		return AlertRule{}, fmt.Errorf("upsert alert rule: %w", err)
@@ -287,6 +303,8 @@ func (s *SQLiteStore) ListAlertRules(ctx context.Context) ([]AlertRule, error) {
 	for rows.Next() {
 		var rule AlertRule
 		var enabled int
+		var createdAtRaw string
+		var updatedAtRaw string
 		if err := rows.Scan(
 			&rule.ID,
 			&rule.Workspace,
@@ -298,11 +316,21 @@ func (s *SQLiteStore) ListAlertRules(ctx context.Context) ([]AlertRule, error) {
 			&rule.ServerName,
 			&rule.Method,
 			&enabled,
-			&rule.CreatedAt,
-			&rule.UpdatedAt,
+			&createdAtRaw,
+			&updatedAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan alert rule: %w", err)
 		}
+		createdAt, err := parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert rule created_at: %w", err)
+		}
+		updatedAt, err := parseSQLiteTime(updatedAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert rule updated_at: %w", err)
+		}
+		rule.CreatedAt = createdAt
+		rule.UpdatedAt = updatedAt
 		rule.Enabled = enabled != 0
 		rules = append(rules, rule)
 	}
@@ -342,7 +370,7 @@ func (s *SQLiteStore) InsertAlertEvent(ctx context.Context, event AlertEvent) er
 		event.DeliveryTarget,
 		event.DeliveryDetail,
 		event.DeliveryAttempts,
-		event.CreatedAt.UTC(),
+		sqliteTimestamp(event.CreatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("insert alert event: %w", err)
@@ -383,6 +411,7 @@ func (s *SQLiteStore) ListAlertEvents(ctx context.Context, workspace, environmen
 	var events []AlertEvent
 	for rows.Next() {
 		var event AlertEvent
+		var createdAtRaw string
 		if err := rows.Scan(
 			&event.ID,
 			&event.RuleID,
@@ -400,10 +429,15 @@ func (s *SQLiteStore) ListAlertEvents(ctx context.Context, workspace, environmen
 			&event.DeliveryTarget,
 			&event.DeliveryDetail,
 			&event.DeliveryAttempts,
-			&event.CreatedAt,
+			&createdAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan alert event: %w", err)
 		}
+		createdAt, err := parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert event created_at: %w", err)
+		}
+		event.CreatedAt = createdAt
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -422,6 +456,7 @@ func (s *SQLiteStore) LatestAlertEvent(ctx context.Context, workspace, environme
 	`, ruleID, workspace, environment)
 
 	var event AlertEvent
+	var createdAtRaw string
 	if err := row.Scan(
 		&event.ID,
 		&event.RuleID,
@@ -439,13 +474,18 @@ func (s *SQLiteStore) LatestAlertEvent(ctx context.Context, workspace, environme
 		&event.DeliveryTarget,
 		&event.DeliveryDetail,
 		&event.DeliveryAttempts,
-		&event.CreatedAt,
+		&createdAtRaw,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("query latest alert event: %w", err)
 	}
+	createdAt, err := parseSQLiteTime(createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse latest alert event created_at: %w", err)
+	}
+	event.CreatedAt = createdAt
 	return &event, nil
 }
 
@@ -565,6 +605,7 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 	var traces []Trace
 	for rows.Next() {
 		var trace Trace
+		var createdAtRaw string
 		if err := rows.Scan(
 			&trace.ID,
 			&trace.TraceID,
@@ -579,10 +620,15 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 			&trace.LatencyMs,
 			&trace.IsError,
 			&trace.ErrorMessage,
-			&trace.CreatedAt,
+			&createdAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan trace: %w", err)
 		}
+		createdAt, err := parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse trace created_at: %w", err)
+		}
+		trace.CreatedAt = createdAt
 		traces = append(traces, trace)
 	}
 
@@ -623,6 +669,10 @@ func boolToInt(value bool) int {
 	return 0
 }
 
+func sqliteTimestamp(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
+
 func buildWindowedTraceFilter(filter QueryFilter) (string, []any) {
 	var conditions []string
 	var args []any
@@ -644,7 +694,11 @@ func buildWindowedTraceFilter(filter QueryFilter) (string, []any) {
 	}
 	if filter.CreatedAfter != nil {
 		conditions = append(conditions, "created_at >= ?")
-		args = append(args, filter.CreatedAfter.UTC())
+		args = append(args, sqliteTimestamp(*filter.CreatedAfter))
+	}
+	if filter.CreatedBefore != nil {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, sqliteTimestamp(*filter.CreatedBefore))
 	}
 	if filter.IsError != nil {
 		conditions = append(conditions, "is_error = ?")

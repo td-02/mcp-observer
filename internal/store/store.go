@@ -23,15 +23,17 @@ type Trace struct {
 }
 
 type QueryFilter struct {
-	TraceID      string
-	Workspace    string
-	Environment  string
-	ServerName   string
-	Method       string
-	IsError      *bool
-	CreatedAfter *time.Time
-	Offset       int
-	Limit        int
+	TraceID       string
+	Search        string
+	Workspace     string
+	Environment   string
+	ServerName    string
+	Method        string
+	IsError       *bool
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	Offset        int
+	Limit         int
 }
 
 type ListOptions struct {

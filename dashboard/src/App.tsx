@@ -73,6 +73,17 @@ type AlertRule = {
   enabled: boolean
 }
 
+type AlertRuleDraft = {
+  id: string
+  name: string
+  rule_type: AlertRuleType
+  threshold: string
+  window_minutes: string
+  server_name: string
+  method: string
+  enabled: boolean
+}
+
 type AlertEvaluation = {
   rule_id: string
   name: string
@@ -123,6 +134,9 @@ function App() {
   const [selectedServer, setSelectedServer] = useState<string>('')
   const [methodFilter, setMethodFilter] = useState<string>('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
+  const [traceSearch, setTraceSearch] = useState('')
+  const [traceAfter, setTraceAfter] = useState('')
+  const [traceBefore, setTraceBefore] = useState('')
   const [workspace, setWorkspace] = useState(() => readStoredValue('mcpscope.workspace', 'default'))
   const [environment, setEnvironment] = useState(() => readStoredValue('mcpscope.environment', 'default'))
   const [authToken, setAuthToken] = useState(() => readStoredValue('mcpscope.authToken', ''))
@@ -139,14 +153,7 @@ function App() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'closed'>('connecting')
   const [errorMessage, setErrorMessage] = useState('')
-  const [alertDraft, setAlertDraft] = useState({
-    name: '',
-    rule_type: 'error_rate' as AlertRuleType,
-    threshold: '5',
-    window_minutes: '15',
-    server_name: '',
-    method: '',
-  })
+  const [alertDraft, setAlertDraft] = useState<AlertRuleDraft>(() => emptyAlertDraft())
 
   useEffect(() => {
     window.localStorage.setItem('mcpscope.workspace', workspace)
@@ -165,15 +172,22 @@ function App() {
 
     const loadTraces = async (offset = 0, append = false) => {
       const response = await apiFetch(
-        apiURL('/api/traces', authToken, {
-          environment,
-          workspace,
-          server: selectedServer,
-          method: methodFilter,
-          status: statusFilter,
-          limit: '50',
-          offset: String(offset),
-        }),
+        apiURL(
+          '/api/traces',
+          authToken,
+          buildTraceParams({
+            workspace,
+            environment,
+            server: selectedServer,
+            method: methodFilter,
+            status: statusFilter,
+            search: traceSearch,
+            createdAfter: traceAfter,
+            createdBefore: traceBefore,
+            limit: '50',
+            offset: String(offset),
+          }),
+        ),
         authToken,
       )
       const data = (await response.json()) as TraceListResponse
@@ -198,13 +212,22 @@ function App() {
     })
 
     const source = new EventSource(
-        apiURL('/events', authToken, {
+      apiURL(
+        '/events',
+        authToken,
+        buildTraceParams({
           workspace,
           environment,
-        server: selectedServer,
-        method: methodFilter,
-        status: statusFilter,
-      }),
+          server: selectedServer,
+          method: methodFilter,
+          status: statusFilter,
+          search: traceSearch,
+          createdAfter: traceAfter,
+          createdBefore: traceBefore,
+          limit: '',
+          offset: '',
+        }),
+      ),
     )
     source.onopen = () => {
       if (active) {
@@ -232,7 +255,7 @@ function App() {
       active = false
       source.close()
     }
-  }, [authToken, workspace, environment, selectedServer, methodFilter, statusFilter])
+  }, [authToken, workspace, environment, selectedServer, methodFilter, statusFilter, traceSearch, traceAfter, traceBefore])
 
   useEffect(() => {
     let active = true
@@ -364,15 +387,22 @@ function App() {
     setLoadingMore(true)
     try {
       const response = await apiFetch(
-        apiURL('/api/traces', authToken, {
-          environment,
-          workspace,
-          server: selectedServer,
-          method: methodFilter,
-          status: statusFilter,
-          limit: '50',
-          offset: String(traceOffset),
-        }),
+        apiURL(
+          '/api/traces',
+          authToken,
+          buildTraceParams({
+            workspace,
+            environment,
+            server: selectedServer,
+            method: methodFilter,
+            status: statusFilter,
+            search: traceSearch,
+            createdAfter: traceAfter,
+            createdBefore: traceBefore,
+            limit: '50',
+            offset: String(traceOffset),
+          }),
+        ),
         authToken,
       )
       const data = (await response.json()) as TraceListResponse
@@ -399,35 +429,46 @@ function App() {
     setAlertEvents((await eventsResponse.json()) as AlertEvent[])
   }
 
+  const startEditingRule = (rule: AlertRule) => {
+    setAlertDraft({
+      id: rule.id,
+      name: rule.name,
+      rule_type: rule.rule_type,
+      threshold: String(rule.threshold),
+      window_minutes: String(rule.window_minutes),
+      server_name: rule.server_name ?? '',
+      method: rule.method ?? '',
+      enabled: rule.enabled,
+    })
+  }
+
+  const clearAlertDraft = () => {
+    setAlertDraft(emptyAlertDraft())
+  }
+
+  const upsertAlertRule = async (draft: AlertRuleDraft) => {
+    await apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: draft.id || undefined,
+        workspace,
+        environment,
+        name: draft.name,
+        rule_type: draft.rule_type,
+        threshold: Number(draft.threshold),
+        window_minutes: Number(draft.window_minutes),
+        server_name: draft.server_name,
+        method: draft.method,
+        enabled: draft.enabled,
+      }),
+    })
+  }
+
   const saveAlertRule = async () => {
     try {
-      const response = await apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspace,
-          environment,
-          name: alertDraft.name,
-          rule_type: alertDraft.rule_type,
-          threshold: Number(alertDraft.threshold),
-          window_minutes: Number(alertDraft.window_minutes),
-          server_name: alertDraft.server_name,
-          method: alertDraft.method,
-          enabled: true,
-        }),
-      })
-      if (!response.ok) {
-        throw new Error(`failed to save alert rule: ${response.status}`)
-      }
-
-      setAlertDraft({
-        name: '',
-        rule_type: 'error_rate',
-        threshold: '5',
-        window_minutes: '15',
-        server_name: '',
-        method: '',
-      })
+      await upsertAlertRule(alertDraft)
+      clearAlertDraft()
       setErrorMessage('')
       await refreshAlerts()
     } catch (error) {
@@ -446,6 +487,25 @@ function App() {
         throw new Error(`failed to delete alert rule: ${response.status}`)
       }
 
+      setErrorMessage('')
+      await refreshAlerts()
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error))
+    }
+  }
+
+  const toggleAlertRule = async (rule: AlertRule) => {
+    try {
+      await upsertAlertRule({
+        id: rule.id,
+        name: rule.name,
+        rule_type: rule.rule_type,
+        threshold: String(rule.threshold),
+        window_minutes: String(rule.window_minutes),
+        server_name: rule.server_name ?? '',
+        method: rule.method ?? '',
+        enabled: !rule.enabled,
+      })
       setErrorMessage('')
       await refreshAlerts()
     } catch (error) {
@@ -500,6 +560,25 @@ function App() {
               onChange={(event) => setMethodFilter(event.target.value)}
               placeholder="tools/call"
             />
+          </label>
+
+          <label className="trace-search">
+            <span>Search</span>
+            <input
+              value={traceSearch}
+              onChange={(event) => setTraceSearch(event.target.value)}
+              placeholder="trace id, method, payload..."
+            />
+          </label>
+
+          <label className="date-control">
+            <span>From</span>
+            <input type="datetime-local" value={traceAfter} onChange={(event) => setTraceAfter(event.target.value)} />
+          </label>
+
+          <label className="date-control">
+            <span>To</span>
+            <input type="datetime-local" value={traceBefore} onChange={(event) => setTraceBefore(event.target.value)} />
           </label>
 
           <label>
@@ -589,6 +668,9 @@ function App() {
                 server: selectedServer,
                 method: methodFilter,
                 status: statusFilter,
+                search: traceSearch,
+                created_after: toQueryTimestamp(traceAfter),
+                created_before: toQueryTimestamp(traceBefore),
                 limit: '200',
               })}
             >
@@ -600,6 +682,7 @@ function App() {
               <thead>
                 <tr>
                   <th>Timestamp</th>
+                  <th>Trace ID</th>
                   <th>Workspace</th>
                   <th>Environment</th>
                   <th>Server</th>
@@ -611,7 +694,7 @@ function App() {
               <tbody>
                 {traces.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="empty">
+                    <td colSpan={8} className="empty">
                       No traces yet. Start calling tools through the proxy to populate the feed.
                     </td>
                   </tr>
@@ -627,6 +710,7 @@ function App() {
                           }
                         >
                           <td>{formatTimestamp(trace.created_at)}</td>
+                          <td className="mono">{trace.trace_id}</td>
                           <td>{trace.workspace}</td>
                           <td>{trace.environment}</td>
                           <td>{trace.server_name}</td>
@@ -640,7 +724,7 @@ function App() {
                         </tr>
                         {expanded ? (
                           <tr className="detail-row">
-                            <td colSpan={7}>
+                            <td colSpan={8}>
                               <div className="detail-grid">
                                 <div>
                                   <h3>Params</h3>
@@ -743,9 +827,14 @@ function App() {
           <section className="panel-card">
             <div className="panel-header">
               <div>
-                <h2>Alert Rules</h2>
+                <h2>{alertDraft.id ? 'Edit Alert Rule' : 'Alert Rules'}</h2>
                 <p>Thresholds are scoped to the active environment and can notify configured webhooks.</p>
               </div>
+              {alertDraft.id ? (
+                <button type="button" className="inline-action" onClick={clearAlertDraft}>
+                  Cancel edit
+                </button>
+              ) : null}
             </div>
             <div className="alert-form">
               <label>
@@ -804,8 +893,18 @@ function App() {
                   placeholder="optional"
                 />
               </label>
+              <label className="alert-enabled">
+                <span>Enabled</span>
+                <input
+                  type="checkbox"
+                  checked={alertDraft.enabled}
+                  onChange={(event) =>
+                    setAlertDraft((current) => ({ ...current, enabled: event.target.checked }))
+                  }
+                />
+              </label>
               <button type="button" className="load-more" onClick={saveAlertRule}>
-                Save Rule
+                {alertDraft.id ? 'Update Rule' : 'Save Rule'}
               </button>
             </div>
 
@@ -818,11 +917,24 @@ function App() {
                     <div className="timeline-top">
                       <div>
                         <h3>{rule.name}</h3>
-                        <p>{rule.rule_type} threshold {rule.threshold}</p>
+                        <p>
+                          {rule.rule_type} threshold {rule.threshold}
+                        </p>
                       </div>
-                      <button type="button" className="inline-action" onClick={() => deleteAlertRule(rule.id)}>
-                        Delete
-                      </button>
+                      <div className="rule-actions">
+                        <span className={rule.enabled ? 'pill success' : 'pill neutral'}>
+                          {rule.enabled ? 'enabled' : 'disabled'}
+                        </span>
+                        <button type="button" className="inline-action" onClick={() => startEditingRule(rule)}>
+                          Edit
+                        </button>
+                        <button type="button" className="inline-action" onClick={() => toggleAlertRule(rule)}>
+                          {rule.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        <button type="button" className="inline-action" onClick={() => deleteAlertRule(rule.id)}>
+                          Delete
+                        </button>
+                      </div>
                     </div>
                     <p className="timeline-meta">
                       {rule.window_minutes}m {rule.server_name ? `| ${rule.server_name}` : ''}{' '}
@@ -908,6 +1020,58 @@ function App() {
 function readStoredValue(key: string, fallback: string) {
   const value = window.localStorage.getItem(key)
   return value && value.trim() !== '' ? value : fallback
+}
+
+function emptyAlertDraft(): AlertRuleDraft {
+  return {
+    id: '',
+    name: '',
+    rule_type: 'error_rate',
+    threshold: '5',
+    window_minutes: '15',
+    server_name: '',
+    method: '',
+    enabled: true,
+  }
+}
+
+function buildTraceParams(input: {
+  workspace: string
+  environment: string
+  server: string
+  method: string
+  status: StatusFilter
+  search: string
+  createdAfter: string
+  createdBefore: string
+  limit: string
+  offset: string
+}) {
+  return {
+    workspace: input.workspace,
+    environment: input.environment,
+    server: input.server,
+    method: input.method,
+    status: input.status,
+    search: input.search,
+    created_after: toQueryTimestamp(input.createdAfter),
+    created_before: toQueryTimestamp(input.createdBefore),
+    limit: input.limit,
+    offset: input.offset,
+  }
+}
+
+function toQueryTimestamp(value: string) {
+  if (value.trim() === '') {
+    return ''
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.valueOf())) {
+    return value
+  }
+
+  return parsed.toISOString()
 }
 
 async function apiFetch(input: string, authToken: string, init?: RequestInit) {

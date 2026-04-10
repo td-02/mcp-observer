@@ -742,13 +742,16 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
-		Workspace:   filter.Workspace,
-		Environment: filter.Environment,
-		ServerName:  filter.ServerName,
-		Method:      filter.Method,
-		IsError:     filter.IsError,
-		Limit:       limit + 1,
-		Offset:      offset,
+		Workspace:     filter.Workspace,
+		Environment:   filter.Environment,
+		ServerName:    filter.ServerName,
+		Method:        filter.Method,
+		Search:        filter.Search,
+		IsError:       filter.IsError,
+		CreatedAfter:  filter.CreatedAfter,
+		CreatedBefore: filter.CreatedBefore,
+		Limit:         limit + 1,
+		Offset:        offset,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -819,6 +822,15 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 				continue
 			}
 			if filter.IsError != nil && record.IsError != *filter.IsError {
+				continue
+			}
+			if filter.Search != "" && !traceRecordMatchesSearch(record, filter.Search) {
+				continue
+			}
+			if filter.CreatedAfter != nil && record.CreatedAt.Before(filter.CreatedAfter.UTC()) {
+				continue
+			}
+			if filter.CreatedBefore != nil && record.CreatedAt.After(filter.CreatedBefore.UTC()) {
 				continue
 			}
 			payload, err := json.Marshal(record)
@@ -1041,6 +1053,7 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
 		TraceID:      filter.TraceID,
+		Search:       filter.Search,
 		Workspace:    filter.Workspace,
 		Environment:  filter.Environment,
 		ServerName:   filter.ServerName,
@@ -1213,10 +1226,28 @@ func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, 
 
 	filter := store.QueryFilter{
 		TraceID:     strings.TrimSpace(query.Get("trace_id")),
+		Search:      strings.TrimSpace(query.Get("search")),
 		Workspace:   workspaceFromRequest(r, cfg),
 		Environment: environmentFromRequest(r, cfg),
 		ServerName:  strings.TrimSpace(query.Get("server")),
 		Method:      strings.TrimSpace(query.Get("method")),
+	}
+	if raw := strings.TrimSpace(query.Get("created_after")); raw != "" {
+		parsed, err := parseQueryTime(raw)
+		if err != nil {
+			return store.QueryFilter{}, 0, 0, fmt.Errorf("created_after must be a valid timestamp")
+		}
+		filter.CreatedAfter = &parsed
+	}
+	if raw := strings.TrimSpace(query.Get("created_before")); raw != "" {
+		parsed, err := parseQueryTime(raw)
+		if err != nil {
+			return store.QueryFilter{}, 0, 0, fmt.Errorf("created_before must be a valid timestamp")
+		}
+		filter.CreatedBefore = &parsed
+	}
+	if filter.CreatedAfter != nil && filter.CreatedBefore != nil && filter.CreatedAfter.After(*filter.CreatedBefore) {
+		return store.QueryFilter{}, 0, 0, fmt.Errorf("created_after must be earlier than or equal to created_before")
 	}
 	switch strings.TrimSpace(query.Get("status")) {
 	case "":
@@ -1231,6 +1262,47 @@ func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, 
 	}
 
 	return filter, limit, offset, nil
+}
+
+func parseQueryTime(raw string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid time")
+}
+
+func traceRecordMatchesSearch(record traceAPIRecord, search string) bool {
+	search = strings.ToLower(strings.TrimSpace(search))
+	if search == "" {
+		return true
+	}
+
+	fields := []string{
+		record.ID,
+		record.TraceID,
+		record.Workspace,
+		record.Environment,
+		record.ServerName,
+		record.Method,
+		record.ErrorMessage,
+		string(record.Params),
+		string(record.Response),
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), search) {
+			return true
+		}
+	}
+	return false
 }
 
 func environmentFromRequest(r *http.Request, cfg Config) string {
