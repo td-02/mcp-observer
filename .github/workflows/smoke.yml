@@ -133,7 +133,7 @@ jobs:
           assert_contains "readyz" "$ready_body" '"ready":true'
 
           root_body="$(curl -fsS "http://127.0.0.1:${proxy_port}/")"
-          assert_contains "root" "$root_body" 'mcpscope'
+          assert_contains "root" "$root_body" '<div id="root"></div>'
 
           post_body="$(curl -fsS -X POST "http://127.0.0.1:${proxy_port}/" \
             -H 'Content-Type: application/json' \
