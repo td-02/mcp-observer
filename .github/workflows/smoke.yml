@@ -74,6 +74,16 @@ jobs:
             echo "--- proxy log ---"
             cat "$proxy_log" 2>/dev/null || true
           }
+          assert_contains() {
+            local label="$1"
+            local body="$2"
+            local needle="$3"
+            if [[ "$body" != *"$needle"* ]]; then
+              echo "assertion failed: $label"
+              echo "$body"
+              exit 1
+            fi
+          }
           trap cleanup EXIT
           trap dump_logs ERR
 
@@ -117,18 +127,18 @@ jobs:
           fi
 
           health_body="$(curl -fsS "http://127.0.0.1:${proxy_port}/healthz")"
-          [[ "$health_body" == *'"status":"ok"'* ]]
+          assert_contains "healthz" "$health_body" '"status":"ok"'
 
           ready_body="$(curl -fsS "http://127.0.0.1:${proxy_port}/readyz")"
-          [[ "$ready_body" == *'"ready":true'* ]]
+          assert_contains "readyz" "$ready_body" '"ready":true'
 
           root_body="$(curl -fsS "http://127.0.0.1:${proxy_port}/")"
-          [[ "$root_body" == *mcpscope* ]]
+          assert_contains "root" "$root_body" 'mcpscope'
 
           post_body="$(curl -fsS -X POST "http://127.0.0.1:${proxy_port}/" \
             -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"message":"ping"}}')"
-          [[ "$post_body" == *'"result"'* ]]
+          assert_contains "post" "$post_body" '"result"'
 
           traces_body="$(curl -fsS "http://127.0.0.1:${proxy_port}/api/traces?workspace=default&environment=default")"
-          [[ "$traces_body" == *'"method":"tools/call"'* ]]
+          assert_contains "traces" "$traces_body" '"method":"tools/call"'
