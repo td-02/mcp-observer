@@ -52,12 +52,7 @@ jobs:
           proxy_log="$RUNNER_TEMP/mcpscope.log"
           db_path="$RUNNER_TEMP/mcpscope.db"
           allocate_port() {
-            python3 - <<'PY'
-import socket
-with socket.socket() as s:
-    s.bind(("127.0.0.1", 0))
-    print(s.getsockname()[1])
-PY
+            python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
           }
           upstream_port="$(allocate_port)"
           proxy_port="$(allocate_port)"
