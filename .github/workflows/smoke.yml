@@ -51,8 +51,16 @@ jobs:
           mock_log="$RUNNER_TEMP/mockhttp.log"
           proxy_log="$RUNNER_TEMP/mcpscope.log"
           db_path="$RUNNER_TEMP/mcpscope.db"
-          upstream_port=18081
-          proxy_port=18080
+          allocate_port() {
+            python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+          }
+          upstream_port="$(allocate_port)"
+          proxy_port="$(allocate_port)"
 
           cleanup() {
             if [[ -n "${proxy_pid:-}" ]]; then
@@ -86,6 +94,11 @@ jobs:
 
           proxy_ready=false
           for _ in {1..30}; do
+            if ! kill -0 "$proxy_pid" >/dev/null 2>&1; then
+              echo "mcpscope proxy exited before becoming ready"
+              cat "$proxy_log"
+              exit 1
+            fi
             if curl -fsS "http://127.0.0.1:${proxy_port}/readyz" >/dev/null; then
               proxy_ready=true
               break
