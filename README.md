@@ -18,7 +18,7 @@ Open source MCP observability: proxy traffic, inspect traces, replay calls, diff
 ## Quick start
 
 ```bash
-go install github.com/td-02/mcpscope@latest
+go install github.com/td-02/mcp-observer/...@latest
 ```
 
 ```bash

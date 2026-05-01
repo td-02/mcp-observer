@@ -16,6 +16,9 @@ test: dashboard-build
 	go test ./...
 
 run:
+ifndef SERVER
+	$(error Run with: make run SERVER=./path/to/your-mcp-server)
+endif
 	go run . proxy --server "$(SERVER)" --port "$(PORT)" --transport "$(TRANSPORT)"
 
 demo: ## Generate demo GIF, MP4, and teaser GIF
