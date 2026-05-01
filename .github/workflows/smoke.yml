@@ -56,6 +56,9 @@ jobs:
           }
           upstream_port="$(allocate_port)"
           proxy_port="$(allocate_port)"
+          while [[ "$proxy_port" == "$upstream_port" ]]; do
+            proxy_port="$(allocate_port)"
+          done
 
           cleanup() {
             if [[ -n "${proxy_pid:-}" ]]; then
