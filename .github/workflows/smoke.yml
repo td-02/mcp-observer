@@ -72,7 +72,7 @@ jobs:
 
           upstream_ready=false
           for _ in {1..30}; do
-            if curl -fsS "http://127.0.0.1:${upstream_port}/readyz" >/dev/null; then
+            if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${upstream_port}/readyz" || true)" == "200" ]]; then
               upstream_ready=true
               break
             fi
@@ -94,7 +94,7 @@ jobs:
               cat "$proxy_log"
               exit 1
             fi
-            if curl -fsS "http://127.0.0.1:${proxy_port}/readyz" >/dev/null; then
+            if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${proxy_port}/readyz" || true)" == "200" ]]; then
               proxy_ready=true
               break
             fi
