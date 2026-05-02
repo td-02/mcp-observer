@@ -29,6 +29,7 @@ type Config struct {
 	ServerCommand   []string
 	UpstreamURL     string
 	ServerName      string
+	Version         string
 	Workspace       string
 	Environment     string
 	AuthToken       string
@@ -62,6 +63,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.Environment) == "" {
 		cfg.Environment = "default"
+	}
+	if strings.TrimSpace(cfg.Version) == "" {
+		cfg.Version = "dev"
 	}
 
 	switch cfg.Transport {
@@ -121,6 +125,11 @@ type statusResponse struct {
 	Status  string          `json:"status"`
 	Ready   bool            `json:"ready"`
 	Checks  map[string]bool `json:"checks,omitempty"`
+}
+
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 type traceEventHub struct {
@@ -686,11 +695,11 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 }
 
 func handleHealthz(w http.ResponseWriter, cfg Config) {
-	writeStatus(w, http.StatusOK, statusResponse{
-		Service: "mcpscope",
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(healthResponse{
 		Status:  "ok",
-		Ready:   isReady(cfg),
-		Checks:  readinessChecks(cfg),
+		Version: cfg.Version,
 	})
 }
 

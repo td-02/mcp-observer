@@ -17,6 +17,7 @@ var rootCmd = &cobra.Command{
 }
 
 var dashboardFS fs.FS
+var buildVersion = "dev"
 var configPath string
 var loadedConfig appconfig.Config
 
@@ -46,6 +47,14 @@ func (e exitCodeError) ExitCode() int {
 
 func SetDashboardFS(static fs.FS) {
 	dashboardFS = static
+}
+
+func SetVersion(version string) {
+	if version == "" {
+		buildVersion = "dev"
+		return
+	}
+	buildVersion = version
 }
 
 func AsExitCoder(err error) (interface{ ExitCode() int }, bool) {

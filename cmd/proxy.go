@@ -107,6 +107,7 @@ func newProxyCmd() *cobra.Command {
 				ServerCommand:   target.command,
 				UpstreamURL:     target.upstreamURL,
 				ServerName:      target.serverName(),
+				Version:         buildVersion,
 				Port:            port,
 				Transport:       normalizedTransport,
 				Workspace:       defaultWorkspace(workspace),

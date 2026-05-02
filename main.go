@@ -8,6 +8,8 @@ import (
 	"mcpscope/cmd"
 )
 
+var version = "dev"
+
 func main() {
 	dashboardFS, err := fs.Sub(embeddedDashboard, "dashboard/dist")
 	if err != nil {
@@ -15,6 +17,7 @@ func main() {
 	}
 
 	cmd.SetDashboardFS(dashboardFS)
+	cmd.SetVersion(version)
 
 	if err := cmd.Execute(); err != nil {
 		if exitErr, ok := cmd.AsExitCoder(err); ok {

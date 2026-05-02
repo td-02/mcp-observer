@@ -2,13 +2,14 @@ project_name: mcpscope
 
 before:
   hooks:
-    - cd dashboard && npm ci
-    - cd dashboard && npm run build
+    - cd dashboard && npm ci && npm run build
 
 builds:
   - id: mcpscope
     main: .
     binary: mcpscope
+    ldflags:
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:

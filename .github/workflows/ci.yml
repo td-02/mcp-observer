@@ -22,13 +22,11 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
-      - name: Install dashboard dependencies
-        run: npm ci
-        working-directory: dashboard
-
       - name: Build dashboard assets
-        run: npm run build
-        working-directory: dashboard
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
 
       - name: Lint dashboard
         run: npm run lint
