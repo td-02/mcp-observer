@@ -1,53 +1,29 @@
 package cmd
 
 import (
-	"bytes"
+	"bufio"
+	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
-
-	"mcpscope/internal/store"
 )
 
-func TestFilterReplayTraces(t *testing.T) {
+func TestParseIgnoreFields(t *testing.T) {
 	t.Parallel()
 
-	traces := []store.Trace{
-		{TraceID: "1", Workspace: "acme", Environment: "prod"},
-		{TraceID: "2", Workspace: "beta", Environment: "prod"},
-		{TraceID: "3", Workspace: "acme", Environment: "stage"},
-	}
-
-	filtered := filterReplayTraces(traces, "acme", "prod")
-	if len(filtered) != 1 || filtered[0].TraceID != "1" {
-		t.Fatalf("unexpected filtered traces: %+v", filtered)
+	fields := parseIgnoreFields(" $.timestamp , $.request_id,, ")
+	if len(fields) != 2 || fields[0] != "$.timestamp" || fields[1] != "$.request_id" {
+		t.Fatalf("unexpected parsed fields: %#v", fields)
 	}
 }
 
-func TestFinalizeReplayEnforcesThresholds(t *testing.T) {
+func TestReadReplayFrame(t *testing.T) {
 	t.Parallel()
 
-	var output bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetOut(&output)
-
-	report := replayReport{
-		TotalRequests: 2,
-		SuccessCount:  1,
-		ErrorCount:    1,
-		MaxLatencyMs:  250,
+	reader := bufio.NewReader(strings.NewReader("Content-Length: 11\r\n\r\n{\"ok\":true}"))
+	payload, err := readReplayFrame(reader)
+	if err != nil {
+		t.Fatalf("readReplayFrame returned error: %v", err)
 	}
-
-	if err := finalizeReplay(cmd, report, "", false, 300); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if output.Len() == 0 {
-		t.Fatalf("expected replay summary output")
-	}
-	if err := finalizeReplay(cmd, report, "", true, 0); err == nil {
-		t.Fatalf("expected fail-on-error to trigger")
-	}
-	if err := finalizeReplay(cmd, report, "", false, 200); err == nil {
-		t.Fatalf("expected latency threshold to trigger")
+	if string(payload) != "{\"ok\":true}" {
+		t.Fatalf("unexpected payload: %q", string(payload))
 	}
 }

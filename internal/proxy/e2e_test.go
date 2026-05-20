@@ -76,6 +76,20 @@ func TestHTTPHandlerWorkspaceScopedAPIs(t *testing.T) {
 		t.Fatalf("unexpected search payload: %+v", payload)
 	}
 
+	pageReq := httptest.NewRequest(http.MethodGet, "/api/traces?workspace=acme&environment=prod&page=1&per_page=1", nil)
+	pageReq.Header.Set("Authorization", "Bearer secret")
+	pageRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(pageRecorder, pageReq)
+	if pageRecorder.Code != http.StatusOK {
+		t.Fatalf("page status = %d body=%s", pageRecorder.Code, pageRecorder.Body.String())
+	}
+	if err := json.Unmarshal(pageRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("unexpected page payload: %+v", payload)
+	}
+
 	rangeReq := httptest.NewRequest(http.MethodGet, "/api/traces?workspace=acme&environment=prod&created_after="+createdAt.Add(500*time.Millisecond).Format(time.RFC3339Nano), nil)
 	rangeReq.Header.Set("Authorization", "Bearer secret")
 	rangeRecorder := httptest.NewRecorder()
@@ -164,6 +178,67 @@ func TestHTTPHandlerIngestsSdkReportedTraces(t *testing.T) {
 	}
 	if len(payload.Items) != 1 || !payload.Items[0].SdkReported {
 		t.Fatalf("unexpected ingested trace payload: %+v", payload)
+	}
+}
+
+func TestHTTPHandlerReplaysTracesViaSSE(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "mcpscope.db")
+	traceStore, err := store.OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite returned error: %v", err)
+	}
+	defer traceStore.Close()
+
+	createdAt := time.Date(2026, 3, 31, 10, 0, 0, 0, time.UTC)
+	trace := store.Trace{
+		ID:              "1",
+		TraceID:         "trace-1",
+		Workspace:       "acme",
+		Environment:     "prod",
+		ServerName:      "http://example",
+		Method:          "tools/call",
+		ParamsHash:      "params",
+		ParamsPayload:   `{"name":"alpha"}`,
+		ResponseHash:    "response",
+		ResponsePayload: `{"ok":true}`,
+		CreatedAt:       createdAt,
+	}
+	if err := traceStore.Insert(ctx, trace); err != nil {
+		t.Fatalf("Insert returned error: %v", err)
+	}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      "trace-1",
+			"result":  map[string]any{"ok": true},
+		})
+	}))
+	defer target.Close()
+
+	handler := newHTTPHandler(Config{
+		Workspace:   "acme",
+		Environment: "prod",
+		AuthToken:   "secret",
+		Store:       traceStore,
+		Dashboard:   os.DirFS("."),
+	}, nil)
+
+	body := `{"trace_id":"trace-1","server":"` + target.URL + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/replay", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"match":true`) {
+		t.Fatalf("unexpected replay response: %s", recorder.Body.String())
 	}
 }
 

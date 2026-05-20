@@ -235,9 +235,24 @@ th {
   margin-bottom: 0.8rem;
 }
 
+.detail-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
 .detail-pill {
   font-size: 0.68rem;
   padding: 0.3rem 0.6rem;
+}
+
+.replay-result {
+  margin-bottom: 0.8rem;
+}
+
+.replay-result .pill {
+  display: inline-flex;
+  margin-bottom: 0.5rem;
 }
 
 .detail-grid {

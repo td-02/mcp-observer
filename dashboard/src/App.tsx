@@ -33,6 +33,15 @@ type TraceRecord = {
   created_at: string
 }
 
+type ReplayResult = {
+  trace_id: string
+  server: string
+  match: boolean
+  latency_ms: number
+  diff: string
+  status: string
+}
+
 type TraceListResponse = {
   items: TraceRecord[]
   offset: number
@@ -152,6 +161,8 @@ function App() {
   const [alertEvaluations, setAlertEvaluations] = useState<AlertEvaluation[]>([])
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [replayResult, setReplayResult] = useState<ReplayResult | null>(null)
+  const [replayBusy, setReplayBusy] = useState(false)
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'closed'>('connecting')
   const [errorMessage, setErrorMessage] = useState('')
   const [alertDraft, setAlertDraft] = useState<AlertRuleDraft>(() => emptyAlertDraft())
@@ -514,6 +525,38 @@ function App() {
     }
   }
 
+  const replayTrace = async (trace: TraceRecord) => {
+    const defaultServer = trace.server_name.startsWith('http') ? trace.server_name : 'http://localhost:5555'
+    const server = window.prompt('Replay against server URL', defaultServer)
+    if (!server || server.trim() === '') {
+      return
+    }
+
+    setReplayBusy(true)
+    setReplayResult(null)
+    try {
+      const response = await apiFetch(
+        apiURL('/api/replay', authToken, {}),
+        authToken,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ trace_id: trace.trace_id, server: server.trim() }),
+        },
+      )
+      const result = await readSsePayload(response)
+      const payload = JSON.parse(result) as ReplayResult
+      setReplayResult(payload)
+      setErrorMessage('')
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error))
+    } finally {
+      setReplayBusy(false)
+    }
+  }
+
   return (
     <main className="shell">
       <nav className="topbar">
@@ -729,6 +772,24 @@ function App() {
                               {trace.sdk_reported ? (
                                 <div className="detail-badges">
                                   <span className="pill neutral detail-pill">SDK reported</span>
+                                </div>
+                              ) : null}
+                              <div className="detail-actions">
+                                <button
+                                  type="button"
+                                  className="inline-action"
+                                  onClick={() => replayTrace(trace)}
+                                  disabled={replayBusy}
+                                >
+                                  {replayBusy ? 'Replaying...' : 'Replay'}
+                                </button>
+                              </div>
+                              {replayResult && replayResult.trace_id === trace.trace_id ? (
+                                <div className="replay-result">
+                                  <p className={replayResult.match ? 'pill success' : 'pill error'}>
+                                    {replayResult.match ? 'match' : 'mismatch'}
+                                  </p>
+                                  <pre>{replayResult.diff || 'Responses match'}</pre>
                                 </div>
                               ) : null}
                               <div className="detail-grid">
@@ -1105,6 +1166,44 @@ function apiURL(path: string, authToken: string, params: Record<string, string>)
     token: authToken.trim() !== '' ? authToken.trim() : '',
   })
   return `${path}${query}`
+}
+
+async function readSsePayload(response: Response) {
+  if (!response.body) {
+    return response.text()
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) {
+      break
+    }
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split('\n\n')
+    buffer = events.pop() ?? ''
+    for (const event of events) {
+      const lines = event.split('\n').filter((line) => line.startsWith('data:'))
+      if (lines.length === 0) {
+        continue
+      }
+      return lines
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+        .trim()
+    }
+  }
+
+  const lines = buffer.split('\n').filter((line) => line.startsWith('data:'))
+  if (lines.length === 0) {
+    return ''
+  }
+  return lines
+    .map((line) => line.slice(5).trimStart())
+    .join('\n')
+    .trim()
 }
 
 function withQuery(params: Record<string, string>) {

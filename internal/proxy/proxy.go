@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"mcpscope/internal/intercept"
+	"mcpscope/internal/replay"
 	"mcpscope/internal/store"
 	"mcpscope/internal/telemetry"
 )
@@ -639,6 +640,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleTraceExport(w, r, cfg)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/ingest":
 			handleIngestTrace(w, r, cfg)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/replay":
+			handleReplay(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/rules":
 			handleAlertRuleList(w, r, cfg)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/alerts/rules":
@@ -1054,6 +1057,83 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 	_ = json.NewEncoder(w).Encode(traces)
 }
 
+func handleReplay(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if cfg.Store == nil {
+		http.Error(w, "trace storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var input struct {
+		TraceID string `json:"trace_id"`
+		Server  string `json:"server"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid replay payload", http.StatusBadRequest)
+		return
+	}
+	traceID := strings.TrimSpace(input.TraceID)
+	if traceID == "" {
+		http.Error(w, "missing trace_id", http.StatusBadRequest)
+		return
+	}
+
+	trace, err := replay.LoadTraceByID(r.Context(), cfg.Store, traceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	target := strings.TrimSpace(input.Server)
+	if target == "" {
+		target = strings.TrimSpace(trace.ServerName)
+	}
+	if target == "" {
+		http.Error(w, "missing server", http.StatusBadRequest)
+		return
+	}
+	parsedTarget, err := url.Parse(target)
+	if err != nil || (parsedTarget.Scheme != "http" && parsedTarget.Scheme != "https") {
+		http.Error(w, "replay endpoint expects an HTTP server URL", http.StatusBadRequest)
+		return
+	}
+
+	responseBody, latencyMs, err := replay.InvokeHTTP(r.Context(), target, trace)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	match, diff, err := replay.CompareResponses([]byte(trace.ResponsePayload), responseBody, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"trace_id":   trace.TraceID,
+		"server":     target,
+		"match":      match,
+		"latency_ms": latencyMs,
+		"diff":       diff,
+		"status":     "done",
+	})
+	_, _ = fmt.Fprintf(w, "event: replay\n")
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+	flusher.Flush()
+}
+
 func serveDashboardAsset(w http.ResponseWriter, r *http.Request, static fs.FS, fileServer http.Handler) {
 	if static == nil {
 		http.NotFound(w, r)
@@ -1335,21 +1415,40 @@ func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {
 func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, error) {
 	query := r.URL.Query()
 	limit := 50
-	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > 200 {
-			return store.QueryFilter{}, 0, 0, fmt.Errorf("limit must be between 1 and 200")
-		}
-		limit = parsed
-	}
-
 	offset := 0
-	if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			return store.QueryFilter{}, 0, 0, fmt.Errorf("offset must be 0 or greater")
+	if raw := strings.TrimSpace(query.Get("page")); raw != "" || strings.TrimSpace(query.Get("per_page")) != "" {
+		page := 1
+		if raw := strings.TrimSpace(query.Get("page")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 {
+				return store.QueryFilter{}, 0, 0, fmt.Errorf("page must be 1 or greater")
+			}
+			page = parsed
 		}
-		offset = parsed
+		if raw := strings.TrimSpace(query.Get("per_page")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 200 {
+				return store.QueryFilter{}, 0, 0, fmt.Errorf("per_page must be between 1 and 200")
+			}
+			limit = parsed
+		}
+		offset = (page - 1) * limit
+	} else {
+		if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 200 {
+				return store.QueryFilter{}, 0, 0, fmt.Errorf("limit must be between 1 and 200")
+			}
+			limit = parsed
+		}
+
+		if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 0 {
+				return store.QueryFilter{}, 0, 0, fmt.Errorf("offset must be 0 or greater")
+			}
+			offset = parsed
+		}
 	}
 
 	filter := store.QueryFilter{
