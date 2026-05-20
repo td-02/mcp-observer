@@ -11,6 +11,8 @@ Open source MCP observability: proxy traffic, inspect traces, replay calls, diff
 - Serves a local dashboard for traces, latency, errors, and alerts, including trace search, time-range filtering, and alert rule editing
 - Stores traces in SQLite with retention controls
 - Supports workspace and environment scoping
+- Accepts SDK-reported traces through `POST /api/ingest`
+- Ships thin SDKs for direct embedding in Go and TypeScript servers
 - Evaluates built-in alert rules and delivers to webhook, Slack, or PagerDuty
 - Exports traces for replay and CI checks
 - Snapshots and diffs MCP schemas
@@ -43,6 +45,13 @@ mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080
 For source builds, `make build` and `make test` regenerate the dashboard assets before compiling the Go binary.
 
 The dashboard trace view supports text search plus `created_after` and `created_before` filtering, and the Alerts tab lets you edit, enable, disable, or delete rules in place.
+
+SDKs for direct embedding:
+
+- Go: `github.com/td-02/mcp-observer/sdk/go/mcpscope`
+- TypeScript: `@mcpscope/sdk`
+
+See [`examples/sdk-go`](examples/sdk-go/) and [`examples/sdk-typescript`](examples/sdk-typescript/) for minimal usage.
 
 ## Common flows
 

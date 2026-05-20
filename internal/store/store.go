@@ -19,6 +19,7 @@ type Trace struct {
 	LatencyMs       int64     `json:"latency_ms"`
 	IsError         bool      `json:"is_error"`
 	ErrorMessage    string    `json:"error_message"`
+	SdkReported     bool      `json:"sdk_reported"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 

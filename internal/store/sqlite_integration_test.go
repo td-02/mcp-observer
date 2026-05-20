@@ -35,6 +35,7 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 		LatencyMs:       25,
 		IsError:         true,
 		ErrorMessage:    "boom",
+		SdkReported:     true,
 		CreatedAt:       createdAt,
 	}
 
@@ -89,6 +90,9 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	}
 	if got.ErrorMessage != trace.ErrorMessage {
 		t.Fatalf("error_message = %q, want %q", got.ErrorMessage, trace.ErrorMessage)
+	}
+	if got.SdkReported != trace.SdkReported {
+		t.Fatalf("sdk_reported = %v, want %v", got.SdkReported, trace.SdkReported)
 	}
 
 	filtered, err := store.Query(ctx, QueryFilter{TraceID: trace.TraceID, Workspace: trace.Workspace, Environment: trace.Environment, Limit: 1})

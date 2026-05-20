@@ -29,6 +29,7 @@ type TraceRecord = {
   latency_ms: number
   is_error: boolean
   error_message?: string
+  sdk_reported: boolean
   created_at: string
 }
 
@@ -725,6 +726,11 @@ function App() {
                         {expanded ? (
                           <tr className="detail-row">
                             <td colSpan={8}>
+                              {trace.sdk_reported ? (
+                                <div className="detail-badges">
+                                  <span className="pill neutral detail-pill">SDK reported</span>
+                                </div>
+                              ) : null}
                               <div className="detail-grid">
                                 <div>
                                   <h3>Params</h3>

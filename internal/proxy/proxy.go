@@ -90,7 +90,21 @@ type traceAPIRecord struct {
 	LatencyMs    int64           `json:"latency_ms"`
 	IsError      bool            `json:"is_error"`
 	ErrorMessage string          `json:"error_message,omitempty"`
+	SdkReported  bool            `json:"sdk_reported"`
 	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type ingestTraceRequest struct {
+	Method      string          `json:"method"`
+	Params      json.RawMessage `json:"params"`
+	Response    json.RawMessage `json:"response"`
+	DurationMs  int64           `json:"duration_ms"`
+	Error       string          `json:"error"`
+	Timestamp   string          `json:"timestamp"`
+	TraceID     string          `json:"trace_id,omitempty"`
+	Workspace   string          `json:"workspace,omitempty"`
+	Environment string          `json:"environment,omitempty"`
+	ServerName  string          `json:"server_name,omitempty"`
 }
 
 type traceListResponse struct {
@@ -543,50 +557,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if cfg.Telemetry != nil {
 		cfg.Telemetry.RecordCall(ctx, record.ServerName, eventFromRecord(record))
 	}
-
-	if cfg.eventHub != nil {
-		cfg.eventHub.Publish(record)
-	}
-
-	if cfg.Store == nil {
-		return nil
-	}
-
-	if err := cfg.Store.Insert(ctx, store.Trace{
-		ID:              record.ID,
-		TraceID:         record.TraceID,
-		Workspace:       cfg.Workspace,
-		Environment:     cfg.Environment,
-		ServerName:      record.ServerName,
-		Method:          record.Method,
-		ParamsHash:      hashRawMessage(record.Params),
-		ParamsPayload:   rawMessageString(record.Params),
-		ResponseHash:    hashRawMessage(record.Response),
-		ResponsePayload: rawMessageString(record.Response),
-		LatencyMs:       record.LatencyMs,
-		IsError:         record.IsError,
-		ErrorMessage:    record.ErrorMessage,
-		CreatedAt:       record.CreatedAt.UTC(),
-	}); err != nil {
-		return err
-	}
-
-	if cfg.RetentionMaxAge > 0 {
-		if err := cfg.Store.DeleteOlderThan(ctx, record.CreatedAt.Add(-cfg.RetentionMaxAge)); err != nil {
-			return err
-		}
-	}
-	if cfg.MaxTraceCount > 0 {
-		if err := cfg.Store.TrimToCount(ctx, cfg.MaxTraceCount); err != nil {
-			return err
-		}
-	}
-
-	if err := processAlertEvaluations(ctx, cfg); err != nil {
-		return err
-	}
-
-	return nil
+	return persistTraceRecord(ctx, cfg, record)
 }
 
 func captureAndPersistBestEffort(ctx context.Context, cfg Config, transport, direction string, receivedAt, sentAt time.Time, payload []byte) {
@@ -666,6 +637,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleTraceList(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/export/traces":
 			handleTraceExport(w, r, cfg)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/ingest":
+			handleIngestTrace(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/rules":
 			handleAlertRuleList(w, r, cfg)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/alerts/rules":
@@ -1061,16 +1034,17 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
-		TraceID:      filter.TraceID,
-		Search:       filter.Search,
-		Workspace:    filter.Workspace,
-		Environment:  filter.Environment,
-		ServerName:   filter.ServerName,
-		Method:       filter.Method,
-		IsError:      filter.IsError,
-		CreatedAfter: filter.CreatedAfter,
-		Limit:        limit,
-		Offset:       offset,
+		TraceID:       filter.TraceID,
+		Search:        filter.Search,
+		Workspace:     filter.Workspace,
+		Environment:   filter.Environment,
+		ServerName:    filter.ServerName,
+		Method:        filter.Method,
+		IsError:       filter.IsError,
+		CreatedAfter:  filter.CreatedAfter,
+		CreatedBefore: filter.CreatedBefore,
+		Limit:         limit,
+		Offset:        offset,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1119,6 +1093,7 @@ func traceRecordFromEvent(id, serverName string, event intercept.Event) traceAPI
 		LatencyMs:    event.LatencyMs,
 		IsError:      event.IsError,
 		ErrorMessage: event.ErrorMessage,
+		SdkReported:  false,
 		CreatedAt:    time.Unix(0, event.ReceivedAtUnixN).UTC(),
 	}
 }
@@ -1136,6 +1111,7 @@ func traceRecordFromStored(trace store.Trace) traceAPIRecord {
 		LatencyMs:    trace.LatencyMs,
 		IsError:      trace.IsError,
 		ErrorMessage: trace.ErrorMessage,
+		SdkReported:  trace.SdkReported,
 		CreatedAt:    trace.CreatedAt,
 	}
 }
@@ -1186,11 +1162,154 @@ func eventFromRecord(record traceAPIRecord) intercept.Event {
 	}
 }
 
+func handleIngestTrace(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		http.Error(w, "trace storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var input ingestTraceRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid ingest payload", http.StatusBadRequest)
+		return
+	}
+
+	record, err := traceRecordFromIngestRequest(r, cfg, input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := persistTraceRecord(r.Context(), cfg, record); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(record)
+}
+
+func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTraceRequest) (traceAPIRecord, error) {
+	method := strings.TrimSpace(input.Method)
+	if method == "" {
+		return traceAPIRecord{}, fmt.Errorf("method is required")
+	}
+
+	timestamp := time.Now().UTC()
+	if raw := strings.TrimSpace(input.Timestamp); raw != "" {
+		parsed, err := parseQueryTime(raw)
+		if err != nil {
+			return traceAPIRecord{}, fmt.Errorf("timestamp must be a valid timestamp")
+		}
+		timestamp = parsed.UTC()
+	}
+
+	record := traceAPIRecord{
+		ID:           strings.TrimSpace(input.TraceID),
+		TraceID:      strings.TrimSpace(input.TraceID),
+		Workspace:    strings.TrimSpace(input.Workspace),
+		Environment:  strings.TrimSpace(input.Environment),
+		ServerName:   strings.TrimSpace(input.ServerName),
+		Method:       method,
+		Params:       cloneRawMessage(input.Params),
+		Response:     cloneRawMessage(input.Response),
+		LatencyMs:    maxInt64(input.DurationMs, 0),
+		IsError:      strings.TrimSpace(input.Error) != "",
+		ErrorMessage: strings.TrimSpace(input.Error),
+		SdkReported:  true,
+		CreatedAt:    timestamp,
+	}
+
+	if record.Workspace == "" {
+		record.Workspace = strings.TrimSpace(r.Header.Get("X-Mcpscope-Workspace"))
+	}
+	if record.Workspace == "" {
+		record.Workspace = workspaceFromRequest(r, cfg)
+	}
+	if record.Environment == "" {
+		record.Environment = strings.TrimSpace(r.Header.Get("X-Mcpscope-Environment"))
+	}
+	if record.Environment == "" {
+		record.Environment = environmentFromRequest(r, cfg)
+	}
+	if record.ServerName == "" {
+		record.ServerName = strings.TrimSpace(r.Header.Get("X-Mcpscope-Server-Name"))
+	}
+	if record.ServerName == "" {
+		record.ServerName = cfg.ServerName
+	}
+	if record.ServerName == "" {
+		record.ServerName = "sdk"
+	}
+	if record.ID == "" {
+		record.ID = intercept.NewUUID()
+	}
+	if record.TraceID == "" {
+		record.TraceID = record.ID
+	}
+
+	return record, nil
+}
+
+func persistTraceRecord(ctx context.Context, cfg Config, record traceAPIRecord) error {
+	if cfg.eventHub != nil {
+		cfg.eventHub.Publish(record)
+	}
+
+	if cfg.Store == nil {
+		return nil
+	}
+
+	if err := cfg.Store.Insert(ctx, store.Trace{
+		ID:              record.ID,
+		TraceID:         record.TraceID,
+		Workspace:       record.Workspace,
+		Environment:     record.Environment,
+		ServerName:      record.ServerName,
+		Method:          record.Method,
+		ParamsHash:      hashRawMessage(record.Params),
+		ParamsPayload:   rawMessageString(record.Params),
+		ResponseHash:    hashRawMessage(record.Response),
+		ResponsePayload: rawMessageString(record.Response),
+		LatencyMs:       record.LatencyMs,
+		IsError:         record.IsError,
+		ErrorMessage:    record.ErrorMessage,
+		SdkReported:     record.SdkReported,
+		CreatedAt:       record.CreatedAt.UTC(),
+	}); err != nil {
+		return err
+	}
+
+	if cfg.RetentionMaxAge > 0 {
+		if err := cfg.Store.DeleteOlderThan(ctx, record.CreatedAt.Add(-cfg.RetentionMaxAge)); err != nil {
+			return err
+		}
+	}
+	if cfg.MaxTraceCount > 0 {
+		if err := cfg.Store.TrimToCount(ctx, cfg.MaxTraceCount); err != nil {
+			return err
+		}
+	}
+
+	if err := processAlertEvaluations(ctx, cfg); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func maxDurationMs(start, end time.Time) int64 {
 	if end.Before(start) {
 		return 0
 	}
 	return end.Sub(start).Milliseconds()
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {

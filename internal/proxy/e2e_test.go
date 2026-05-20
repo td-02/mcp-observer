@@ -102,6 +102,71 @@ func TestHTTPHandlerWorkspaceScopedAPIs(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlerIngestsSdkReportedTraces(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "mcpscope.db")
+	traceStore, err := store.OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite returned error: %v", err)
+	}
+	defer traceStore.Close()
+
+	handler := newHTTPHandler(Config{
+		Workspace:   "acme",
+		Environment: "prod",
+		AuthToken:   "secret",
+		Store:       traceStore,
+		Dashboard:   os.DirFS("."),
+	}, nil)
+
+	body := `{
+		"method":"hello",
+		"params":{"name":"world"},
+		"response":{"content":[{"type":"text","text":"hi"}]},
+		"duration_ms":12,
+		"error":"",
+		"timestamp":"2026-03-31T10:00:00Z",
+		"server_name":"embedded-sdk"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var saved traceAPIRecord
+	if err := json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if !saved.SdkReported {
+		t.Fatalf("expected sdk_reported to be true: %+v", saved)
+	}
+	if saved.ServerName != "embedded-sdk" {
+		t.Fatalf("unexpected server name: %+v", saved)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/traces?workspace=acme&environment=prod&search=hello", nil)
+	listReq.Header.Set("Authorization", "Bearer secret")
+	listRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(listRecorder, listReq)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var payload traceListResponse
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(payload.Items) != 1 || !payload.Items[0].SdkReported {
+		t.Fatalf("unexpected ingested trace payload: %+v", payload)
+	}
+}
+
 func TestHTTPHandlerAlertRulesRespectWorkspace(t *testing.T) {
 	t.Parallel()
 

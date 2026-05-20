@@ -56,8 +56,9 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 			latency_ms,
 			is_error,
 			error_message,
+			sdk_reported,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.ExecContext(
@@ -76,6 +77,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 		trace.LatencyMs,
 		trace.IsError,
 		trace.ErrorMessage,
+		boolToInt(trace.SdkReported),
 		sqliteTimestamp(trace.CreatedAt),
 	)
 	if err != nil {
@@ -149,6 +151,7 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 			latency_ms,
 			is_error,
 			error_message,
+			sdk_reported,
 			created_at
 		FROM traces
 	`
@@ -188,6 +191,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 			latency_ms,
 			is_error,
 			error_message,
+			sdk_reported,
 			created_at
 		FROM traces
 		ORDER BY created_at DESC
@@ -605,6 +609,7 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 	var traces []Trace
 	for rows.Next() {
 		var trace Trace
+		var sdkReported int
 		var createdAtRaw string
 		if err := rows.Scan(
 			&trace.ID,
@@ -620,10 +625,12 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 			&trace.LatencyMs,
 			&trace.IsError,
 			&trace.ErrorMessage,
+			&sdkReported,
 			&createdAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan trace: %w", err)
 		}
+		trace.SdkReported = sdkReported != 0
 		createdAt, err := parseSQLiteTime(createdAtRaw)
 		if err != nil {
 			return nil, fmt.Errorf("parse trace created_at: %w", err)

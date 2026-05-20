@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added SDK ingest support with `POST /api/ingest`, `sdk_reported` trace metadata, and thin Go / TypeScript SDKs.
 - Added trace search plus `created_after` and `created_before` filtering in the dashboard and trace APIs.
 - Added alert rule editing and enable/disable controls in the dashboard.
 - Tightened trace timestamp handling so retention and time-range filters behave consistently.
