@@ -88,90 +88,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 }
 
 func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, error) {
-	var conditions []string
-	var args []any
-
-	if filter.TraceID != "" {
-		conditions = append(conditions, "trace_id = ?")
-		args = append(args, filter.TraceID)
-	}
-	if search := strings.TrimSpace(filter.Search); search != "" {
-		conditions = append(conditions, `(
-			trace_id LIKE ? OR
-			server_name LIKE ? OR
-			method LIKE ? OR
-			error_message LIKE ? OR
-			params_payload LIKE ? OR
-			response_payload LIKE ?
-		)`)
-		pattern := "%" + search + "%"
-		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
-	}
-	if filter.Workspace != "" {
-		conditions = append(conditions, "workspace = ?")
-		args = append(args, filter.Workspace)
-	}
-	if filter.Environment != "" {
-		conditions = append(conditions, "environment = ?")
-		args = append(args, filter.Environment)
-	}
-	if filter.ServerName != "" {
-		conditions = append(conditions, "server_name = ?")
-		args = append(args, filter.ServerName)
-	}
-	if filter.Method != "" {
-		conditions = append(conditions, "method = ?")
-		args = append(args, filter.Method)
-	}
-	if filter.IsError != nil {
-		conditions = append(conditions, "is_error = ?")
-		args = append(args, *filter.IsError)
-	}
-	if filter.CreatedAfter != nil {
-		conditions = append(conditions, "created_at >= ?")
-		args = append(args, sqliteTimestamp(*filter.CreatedAfter))
-	}
-	if filter.CreatedBefore != nil {
-		conditions = append(conditions, "created_at <= ?")
-		args = append(args, sqliteTimestamp(*filter.CreatedBefore))
-	}
-
-	query := `
-		SELECT
-			id,
-			trace_id,
-			workspace,
-			environment,
-			server_name,
-			method,
-			params_hash,
-			params_payload,
-			response_hash,
-			response_payload,
-			latency_ms,
-			is_error,
-			error_message,
-			sdk_reported,
-			created_at
-		FROM traces
-	`
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " ORDER BY created_at DESC"
-
-	if filter.Limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, filter.Limit)
-		if filter.Offset > 0 {
-			query += " OFFSET ?"
-			args = append(args, filter.Offset)
-		}
-	} else if filter.Offset > 0 {
-		query += " LIMIT -1 OFFSET ?"
-		args = append(args, filter.Offset)
-	}
-
+	query, args := traceQuery(filter)
 	return s.selectTraces(ctx, query, args...)
 }
 
@@ -211,6 +128,15 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 	}
 
 	return s.selectTraces(ctx, query, args...)
+}
+
+func (s *SQLiteStore) QueryRows(ctx context.Context, filter QueryFilter) (*sql.Rows, error) {
+	query, args := traceQuery(filter)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query traces: %w", err)
+	}
+	return rows, nil
 }
 
 func (s *SQLiteStore) Close() error {
@@ -644,6 +570,94 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 	}
 
 	return traces, nil
+}
+
+func traceQuery(filter QueryFilter) (string, []any) {
+	var conditions []string
+	var args []any
+
+	if filter.TraceID != "" {
+		conditions = append(conditions, "trace_id = ?")
+		args = append(args, filter.TraceID)
+	}
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		conditions = append(conditions, `(
+			trace_id LIKE ? OR
+			server_name LIKE ? OR
+			method LIKE ? OR
+			error_message LIKE ? OR
+			params_payload LIKE ? OR
+			response_payload LIKE ?
+		)`)
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	if filter.Workspace != "" {
+		conditions = append(conditions, "workspace = ?")
+		args = append(args, filter.Workspace)
+	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = ?")
+		args = append(args, filter.Environment)
+	}
+	if filter.ServerName != "" {
+		conditions = append(conditions, "server_name = ?")
+		args = append(args, filter.ServerName)
+	}
+	if filter.Method != "" {
+		conditions = append(conditions, "method = ?")
+		args = append(args, filter.Method)
+	}
+	if filter.IsError != nil {
+		conditions = append(conditions, "is_error = ?")
+		args = append(args, *filter.IsError)
+	}
+	if filter.CreatedAfter != nil {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, sqliteTimestamp(*filter.CreatedAfter))
+	}
+	if filter.CreatedBefore != nil {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, sqliteTimestamp(*filter.CreatedBefore))
+	}
+
+	query := `
+		SELECT
+			id,
+			trace_id,
+			workspace,
+			environment,
+			server_name,
+			method,
+			params_hash,
+			params_payload,
+			response_hash,
+			response_payload,
+			latency_ms,
+			is_error,
+			error_message,
+			sdk_reported,
+			created_at
+		FROM traces
+	`
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY created_at DESC"
+
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
+		if filter.Offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, filter.Offset)
+		}
+	} else if filter.Offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		args = append(args, filter.Offset)
+	}
+
+	return query, args
 }
 
 func runMigrations(db *sql.DB) error {

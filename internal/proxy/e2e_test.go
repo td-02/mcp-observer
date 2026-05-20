@@ -114,6 +114,20 @@ func TestHTTPHandlerWorkspaceScopedAPIs(t *testing.T) {
 	if strings.Contains(exportRecorder.Body.String(), `"workspace":"beta"`) {
 		t.Fatalf("export leaked another workspace: %s", exportRecorder.Body.String())
 	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/export?format=json&workspace=acme&environment=prod&status=all", nil)
+	auditReq.Header.Set("Authorization", "Bearer secret")
+	auditRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(auditRecorder, auditReq)
+	if auditRecorder.Code != http.StatusOK {
+		t.Fatalf("audit export status = %d body=%s", auditRecorder.Code, auditRecorder.Body.String())
+	}
+	if got := auditRecorder.Header().Get("Content-Disposition"); !strings.Contains(got, "audit.ndjson") {
+		t.Fatalf("unexpected content disposition: %q", got)
+	}
+	if !strings.Contains(auditRecorder.Body.String(), `"trace_id":"t1"`) {
+		t.Fatalf("unexpected audit export body: %s", auditRecorder.Body.String())
+	}
 }
 
 func TestHTTPHandlerIngestsSdkReportedTraces(t *testing.T) {

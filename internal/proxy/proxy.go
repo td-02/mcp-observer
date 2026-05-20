@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"mcpscope/internal/auditexport"
 	"mcpscope/internal/intercept"
 	"mcpscope/internal/replay"
 	"mcpscope/internal/store"
@@ -636,6 +638,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleReadyz(w, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/traces":
 			handleTraceList(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/export":
+			handleAuditExport(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/export/traces":
 			handleTraceExport(w, r, cfg)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/ingest":
@@ -1021,6 +1025,60 @@ func handleErrorStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	_ = json.NewEncoder(w).Encode(records)
+}
+
+func handleAuditExport(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if cfg.Store == nil {
+		http.Error(w, "trace storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	queryStore, ok := cfg.Store.(interface {
+		QueryRows(context.Context, store.QueryFilter) (*sql.Rows, error)
+	})
+	if !ok {
+		http.Error(w, "streaming export unavailable", http.StatusNotImplemented)
+		return
+	}
+
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = auditexport.FormatJSON
+	}
+
+	filter, err := auditexport.BuildQueryFilter(auditexport.FilterInput{
+		Workspace:   workspaceFromRequest(r, cfg),
+		Environment: environmentFromRequest(r, cfg),
+		Method:      r.URL.Query().Get("method"),
+		Status:      r.URL.Query().Get("status"),
+		From:        r.URL.Query().Get("from"),
+		To:          r.URL.Query().Get("to"),
+	}, time.Now().UTC())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rows, err := queryStore.QueryRows(r.Context(), filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	filename := "audit.ndjson"
+	contentType := "application/x-ndjson; charset=utf-8"
+	if format == auditexport.FormatCSV {
+		filename = "audit.csv"
+		contentType = "text/csv; charset=utf-8"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	if err := auditexport.StreamRows(rows, format, w); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
