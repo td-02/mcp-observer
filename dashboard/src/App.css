@@ -157,6 +157,10 @@
   gap: 1rem;
 }
 
+.alert-config-card {
+  grid-column: 1 / -1;
+}
+
 .table-header,
 .panel-header {
   padding: 1.25rem 1.25rem 1rem;
@@ -289,6 +293,10 @@ pre {
   display: grid;
   gap: 0.9rem;
   padding: 1rem 1.25rem 1.25rem;
+}
+
+.timeline-compact {
+  padding-top: 0.9rem;
 }
 
 .timeline-secondary {

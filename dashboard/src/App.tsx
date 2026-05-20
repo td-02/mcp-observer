@@ -125,6 +125,13 @@ type AlertEvent = {
   created_at: string
 }
 
+type ConfiguredAlertRule = {
+  name: string
+  condition: string
+  channels: string[]
+  last_fired_at?: string
+}
+
 const windows: { value: WindowKey; label: string }[] = [
   { value: '5m', label: 'Last 5m' },
   { value: '30m', label: 'Last 30m' },
@@ -157,6 +164,7 @@ function App() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [latencyStats, setLatencyStats] = useState<LatencyStatRecord[]>([])
   const [errorStats, setErrorStats] = useState<ErrorStatRecord[]>([])
+  const [configuredAlertRules, setConfiguredAlertRules] = useState<ConfiguredAlertRule[]>([])
   const [alertRules, setAlertRules] = useState<AlertRule[]>([])
   const [alertEvaluations, setAlertEvaluations] = useState<AlertEvaluation[]>([])
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([])
@@ -273,7 +281,7 @@ function App() {
     let active = true
 
     const loadPanels = async () => {
-      const [latencyResponse, errorResponse, ruleResponse, evaluationResponse, eventResponse] =
+      const [latencyResponse, errorResponse, configuredRuleResponse, ruleResponse, evaluationResponse, eventResponse] =
         await Promise.all([
           apiFetch(
             apiURL('/api/stats/latency', authToken, {
@@ -295,18 +303,20 @@ function App() {
             }),
             authToken,
           ),
+          apiFetch(apiURL('/api/alert-rules', authToken, { workspace, environment }), authToken),
           apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken),
           apiFetch(apiURL('/api/alerts/evaluations', authToken, { workspace, environment }), authToken),
           apiFetch(apiURL('/api/alerts/events', authToken, { workspace, environment }), authToken),
         ])
 
-      const [latencyData, errorData, rules, evaluations, events] = (await Promise.all([
+      const [latencyData, errorData, configuredRules, rules, evaluations, events] = (await Promise.all([
         latencyResponse.json(),
         errorResponse.json(),
+        configuredRuleResponse.json(),
         ruleResponse.json(),
         evaluationResponse.json(),
         eventResponse.json(),
-      ])) as [LatencyStatRecord[], ErrorStatRecord[], AlertRule[], AlertEvaluation[], AlertEvent[]]
+      ])) as [LatencyStatRecord[], ErrorStatRecord[], ConfiguredAlertRule[], AlertRule[], AlertEvaluation[], AlertEvent[]]
 
       if (!active) {
         return
@@ -315,6 +325,7 @@ function App() {
       setErrorMessage('')
       setLatencyStats(latencyData)
       setErrorStats(errorData)
+      setConfiguredAlertRules(configuredRules)
       setAlertRules(rules)
       setAlertEvaluations(evaluations)
       setAlertEvents(events)
@@ -327,6 +338,7 @@ function App() {
       setErrorMessage(asErrorMessage(error))
       setLatencyStats([])
       setErrorStats([])
+      setConfiguredAlertRules([])
       setAlertRules([])
       setAlertEvaluations([])
       setAlertEvents([])
@@ -338,6 +350,7 @@ function App() {
           return
         }
         setErrorMessage(asErrorMessage(error))
+        setConfiguredAlertRules([])
       })
     }, 10_000)
 
@@ -891,6 +904,35 @@ function App() {
 
       {activeTab === 'alerts' ? (
         <section className="alerts-layout">
+          <section className="panel-card alert-config-card">
+            <div className="panel-header">
+              <div>
+                <h2>Configured Alerting</h2>
+                <p>YAML-backed Slack and PagerDuty rules loaded at startup.</p>
+              </div>
+            </div>
+            <div className="timeline timeline-compact">
+              {configuredAlertRules.length === 0 ? (
+                <p className="empty-block">No configured alert rules loaded.</p>
+              ) : (
+                configuredAlertRules.map((rule) => (
+                  <article key={rule.name} className="timeline-item">
+                    <div className="timeline-top">
+                      <div>
+                        <h3>{rule.name}</h3>
+                        <p className="mono">{rule.condition}</p>
+                      </div>
+                      <span className="pill neutral">{rule.channels.join(', ')}</span>
+                    </div>
+                    <p className="timeline-meta">
+                      {rule.last_fired_at ? `Last fired ${formatTimestamp(rule.last_fired_at)}` : 'Never fired'}
+                    </p>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+
           <section className="panel-card">
             <div className="panel-header">
               <div>
