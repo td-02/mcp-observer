@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"mcpscope/internal/alerting"
 	"mcpscope/internal/proxy"
 	"mcpscope/internal/store"
 	"mcpscope/internal/telemetry"
@@ -32,6 +33,8 @@ func newProxyCmd() *cobra.Command {
 	var workspace string
 	var environment string
 	var authToken string
+	var alertsConfigPath string
+	var publicURL string
 	var notifyWebhooks []string
 	var slackWebhooks []string
 	var pagerDutyKeys []string
@@ -81,6 +84,11 @@ func newProxyCmd() *cobra.Command {
 				return err
 			}
 
+			alertsConfig, err := alerting.LoadConfig(alertsConfigPath)
+			if err != nil {
+				return err
+			}
+
 			target, err := resolveProxyTarget(server, upstreamURL, normalizedTransport, args)
 			if err != nil {
 				return err
@@ -118,6 +126,8 @@ func newProxyCmd() *cobra.Command {
 				RetentionMaxAge: retentionAge,
 				MaxTraceCount:   maxTraces,
 				RedactKeys:      normalizeKeys(redactKeys),
+				AlertingConfig:  alertsConfig,
+				PublicURL:       strings.TrimSpace(publicURL),
 				NotifyWebhooks:  normalizeURLs(notifyWebhooks),
 				SlackWebhooks:   normalizeURLs(slackWebhooks),
 				PagerDutyKeys:   normalizeURLs(pagerDutyKeys),
@@ -143,6 +153,8 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "Logical workspace name for multi-project separation")
 	cmd.Flags().StringVar(&environment, "environment", "default", "Logical environment name for traces, alerts, and replay/export operations")
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token required for dashboard APIs when set")
+	cmd.Flags().StringVar(&alertsConfigPath, "alerts-config", "", "Path to a YAML file describing external alert rules")
+	cmd.Flags().StringVar(&publicURL, "public-url", "", "Public dashboard URL used in alert notifications")
 	cmd.Flags().StringSliceVar(&notifyWebhooks, "notify-webhook", nil, "Webhook URL that receives alert state changes. Repeatable")
 	cmd.Flags().StringSliceVar(&slackWebhooks, "notify-slack-webhook", nil, "Slack webhook URL that receives alert state changes. Repeatable")
 	cmd.Flags().StringSliceVar(&pagerDutyKeys, "notify-pagerduty-key", nil, "PagerDuty routing key that receives alert state changes. Repeatable")

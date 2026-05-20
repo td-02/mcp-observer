@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"mcpscope/internal/alerting"
 	"mcpscope/internal/auditexport"
 	"mcpscope/internal/intercept"
 	"mcpscope/internal/replay"
@@ -46,6 +47,9 @@ type Config struct {
 	NotifyWebhooks  []string
 	SlackWebhooks   []string
 	PagerDutyKeys   []string
+	AlertingConfig  *alerting.Config
+	PublicURL       string
+	AlertingEngine  *alerting.Engine
 	NotifyRetries   int
 	NotifyBackoff   time.Duration
 	Dashboard       fs.FS
@@ -69,6 +73,22 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.Version) == "" {
 		cfg.Version = "dev"
+	}
+
+	if cfg.AlertingConfig != nil {
+		engine, err := alerting.NewEngine(*cfg.AlertingConfig, cfg.Store, alerting.Options{
+			Workspace:   cfg.Workspace,
+			Environment: cfg.Environment,
+			PublicURL:   cfg.PublicURL,
+			Logger:      cfg.Stderr,
+		})
+		if err != nil {
+			return err
+		}
+		cfg.AlertingEngine = engine
+		alertCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go engine.Run(alertCtx)
 	}
 
 	switch cfg.Transport {
@@ -656,6 +676,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleAlertEvaluations(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/events":
 			handleAlertEvents(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/alert-rules":
+			handleConfiguredAlertRules(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/latency":
 			handleLatencyStats(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/errors":
@@ -960,6 +982,15 @@ func handleAlertEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	_ = json.NewEncoder(w).Encode(events)
+}
+
+func handleConfiguredAlertRules(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.AlertingEngine == nil {
+		_ = json.NewEncoder(w).Encode([]alerting.RuleStatus{})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(cfg.AlertingEngine.Snapshot())
 }
 
 func handleLatencyStats(w http.ResponseWriter, r *http.Request, cfg Config) {
