@@ -1,11 +1,11 @@
 # Architecture
 
-`mcpscope` sits between an MCP client and an MCP server. It forwards traffic unchanged, but intercepts every request and response so it can log metadata, persist traces, emit OpenTelemetry spans, and stream updates to the dashboard.
+`mcpscope` sits between an MCP client and one or more MCP servers. It forwards traffic unchanged, but intercepts every request and response so it can log metadata, persist traces, emit OpenTelemetry spans, and stream updates to the dashboard.
 
 ## Intercept pipeline
 
 1. A client sends JSON-RPC traffic to `mcpscope` over stdio or HTTP.
-2. `mcpscope` forwards the raw message to the target MCP server.
+2. `mcpscope` forwards the raw message to the selected MCP worker proxy.
 3. The proxy parses the JSON envelope, extracts method and payload details, and computes hashes, latency, and error metadata.
 4. The event is:
    - written to stderr as structured JSON
@@ -20,6 +20,7 @@ The storage layer is abstracted behind the `TraceStore` interface so the persist
 Stored trace records include:
 
 - server name and method
+- server ID for multi-server fan-out routing
 - params and response payloads
 - hashes for params and responses
 - latency and error state
@@ -33,25 +34,19 @@ The built-in HTTP server serves three roles:
 - JSON APIs for traces and aggregated statistics
 - a live SSE feed for newly intercepted calls
 
-```text
-MCP Client
-   |
-   v
-+------------------------------+
-|          mcpscope            |
-|------------------------------|
-| Proxy transport layer        |
-| JSON-RPC parser              |
-| stderr structured logger     |
-| SQLite TraceStore            |
-| OTEL exporter                |
-| HTTP API + embedded UI       |
-| SSE event broadcaster        |
-+------------------------------+
-   |                  |
-   |                  +--> /api/traces
-   |                  +--> /api/stats/*
-   |                  +--> /events (SSE)
-   v
-Target MCP Server
+```mermaid
+flowchart LR
+  Client["MCP client / agent"] --> Dashboard["mcpscope dashboard + API"]
+  Dashboard --> WorkerA["Worker proxy :4445"]
+  Dashboard --> WorkerB["Worker proxy :4446"]
+  Dashboard --> WorkerC["Worker proxy :4447"]
+  WorkerA --> ServerA["MCP server A"]
+  WorkerB --> ServerB["MCP server B"]
+  WorkerC --> ServerC["MCP server C"]
+  Dashboard --> DB[("SQLite traces.db")]
+  WorkerA --> DB
+  WorkerB --> DB
+  WorkerC --> DB
+  Dashboard --> SSE["/events SSE"]
+  Dashboard --> API["/api/traces /api/stats/*"]
 ```

@@ -17,6 +17,23 @@ Open source MCP observability: proxy traffic, inspect traces, replay calls, diff
 - Exports traces for replay and CI checks
 - Snapshots and diffs MCP schemas
 
+## Architecture
+
+```mermaid
+flowchart LR
+  Client["MCP client / agent"] --> Dashboard["mcpscope dashboard + API"]
+  Dashboard --> WorkerA["Worker proxy :4445"]
+  Dashboard --> WorkerB["Worker proxy :4446"]
+  Dashboard --> WorkerC["Worker proxy :4447"]
+  WorkerA --> ServerA["MCP server A"]
+  WorkerB --> ServerB["MCP server B"]
+  WorkerC --> ServerC["MCP server C"]
+  Dashboard --> DB[("SQLite traces.db")]
+  WorkerA --> DB
+  WorkerB --> DB
+  WorkerC --> DB
+```
+
 ## Quick start
 
 ```bash
