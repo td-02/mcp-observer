@@ -35,6 +35,7 @@ func init() {
 func newDiffCmd() *cobra.Command {
 	var format string
 	var exitCode bool
+	var serverID string
 
 	cmd := &cobra.Command{
 		Use:   "diff <baseline.json> <current.json>",
@@ -80,6 +81,7 @@ func newDiffCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&exitCode, "exit-code", false, "Exit with code 1 if breaking changes are detected")
 	cmd.Flags().StringVar(&format, "format", "", "Optional output format. Use \"json\" for machine-readable output")
+	cmd.Flags().StringVar(&serverID, "server-id", "", "Annotate or scope a diff to a specific mcpscope worker server ID")
 
 	return cmd
 }

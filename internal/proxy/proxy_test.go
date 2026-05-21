@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"mcpscope/internal/intercept"
+	"mcpscope/internal/store"
 )
 
 func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
@@ -23,7 +25,7 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 		requestAt.Add(2*time.Millisecond),
 		[]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"alpha"}}`),
 	)
-	if _, persist := tracker.Record("demo-server", request); persist {
+	if _, persist := tracker.Record("demo-server-id", "demo-server", request); persist {
 		t.Fatalf("expected request frame to be held until the response arrives")
 	}
 
@@ -34,7 +36,7 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 		responseAt.Add(3*time.Millisecond),
 		[]byte(`{"jsonrpc":"2.0","id":7,"result":{"ok":true}}`),
 	)
-	record, persist := tracker.Record("demo-server", response)
+	record, persist := tracker.Record("demo-server-id", "demo-server", response)
 	if !persist {
 		t.Fatalf("expected correlated response to produce a trace")
 	}
@@ -54,6 +56,9 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 	if record.LatencyMs != 78 {
 		t.Fatalf("latency_ms = %d, want 78", record.LatencyMs)
 	}
+	if record.ServerID != "demo-server-id" {
+		t.Fatalf("server_id = %q, want %q", record.ServerID, "demo-server-id")
+	}
 }
 
 func TestTraceTrackerPersistsNotificationsImmediately(t *testing.T) {
@@ -68,7 +73,7 @@ func TestTraceTrackerPersistsNotificationsImmediately(t *testing.T) {
 		[]byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"source":"test"}}`),
 	)
 
-	record, persist := tracker.Record("demo-server", event)
+	record, persist := tracker.Record("demo-server-id", "demo-server", event)
 	if !persist {
 		t.Fatalf("expected notification to persist immediately")
 	}
@@ -77,6 +82,42 @@ func TestTraceTrackerPersistsNotificationsImmediately(t *testing.T) {
 	}
 	if got := string(record.Params); got != `{"source":"test"}` {
 		t.Fatalf("params = %s", got)
+	}
+	if record.ServerID != "demo-server-id" {
+		t.Fatalf("server_id = %q, want %q", record.ServerID, "demo-server-id")
+	}
+}
+
+func TestCaptureAndPersistStoresServerID(t *testing.T) {
+	t.Parallel()
+
+	var saved store.Trace
+	cfg := Config{
+		ServerID:   "server-a",
+		ServerName: "server-a",
+		Store: capturingTraceStore{
+			insert: func(trace store.Trace) error {
+				saved = trace
+				return nil
+			},
+		},
+	}
+	prepareConfig(&cfg)
+
+	if err := captureAndPersist(
+		context.Background(),
+		cfg,
+		"http",
+		"client_to_server",
+		time.Date(2026, 3, 31, 11, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 31, 11, 0, 0, int(5*time.Millisecond), time.UTC),
+		[]byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"source":"test"}}`),
+	); err != nil {
+		t.Fatalf("captureAndPersist returned error: %v", err)
+	}
+
+	if saved.ServerID != "server-a" {
+		t.Fatalf("server_id = %q, want %q", saved.ServerID, "server-a")
 	}
 }
 
@@ -114,4 +155,63 @@ func TestRequireAuthAllowsBearerAndQueryToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+type capturingTraceStore struct {
+	insert func(store.Trace) error
+}
+
+func (c capturingTraceStore) Insert(ctx context.Context, trace store.Trace) error {
+	if c.insert != nil {
+		return c.insert(trace)
+	}
+	return nil
+}
+
+func (c capturingTraceStore) Query(context.Context, store.QueryFilter) ([]store.Trace, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) List(context.Context, store.ListOptions) ([]store.Trace, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) DeleteOlderThan(context.Context, time.Time) error {
+	return nil
+}
+
+func (c capturingTraceStore) TrimToCount(context.Context, int) error {
+	return nil
+}
+
+func (c capturingTraceStore) UpsertAlertRule(context.Context, store.AlertRule) (store.AlertRule, error) {
+	return store.AlertRule{}, nil
+}
+
+func (c capturingTraceStore) ListAlertRules(context.Context) ([]store.AlertRule, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) DeleteAlertRule(context.Context, string) error {
+	return nil
+}
+
+func (c capturingTraceStore) InsertAlertEvent(context.Context, store.AlertEvent) error {
+	return nil
+}
+
+func (c capturingTraceStore) ListAlertEvents(context.Context, string, string, int) ([]store.AlertEvent, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) LatestAlertEvent(context.Context, string, string, string) (*store.AlertEvent, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) QueryLatencyStats(context.Context, store.QueryFilter) ([]store.LatencyStat, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) QueryErrorStats(context.Context, store.QueryFilter) ([]store.ErrorStat, error) {
+	return nil, nil
 }

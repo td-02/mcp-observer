@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarElement,
   CategoryScale,
@@ -22,6 +22,7 @@ type TraceRecord = {
   trace_id: string
   workspace: string
   environment: string
+  server_id: string
   server_name: string
   method: string
   params?: unknown
@@ -51,6 +52,7 @@ type TraceListResponse = {
 }
 
 type LatencyStatRecord = {
+  server_id: string
   server_name: string
   method: string
   count: number
@@ -60,6 +62,7 @@ type LatencyStatRecord = {
 }
 
 type ErrorStatRecord = {
+  server_id: string
   workspace: string
   environment: string
   method: string
@@ -149,6 +152,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('traces')
   const [windowKey, setWindowKey] = useState<WindowKey>('5m')
   const [selectedServer, setSelectedServer] = useState<string>('')
+  const selectedServerRef = useRef('')
   const [methodFilter, setMethodFilter] = useState<string>('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
   const [traceSearch, setTraceSearch] = useState('')
@@ -188,6 +192,10 @@ function App() {
   }, [authToken])
 
   useEffect(() => {
+    selectedServerRef.current = selectedServer
+  }, [selectedServer])
+
+  useEffect(() => {
     let active = true
 
     const loadTraces = async (offset = 0, append = false) => {
@@ -198,7 +206,7 @@ function App() {
           buildTraceParams({
             workspace,
             environment,
-            server: selectedServer,
+            serverId: '',
             method: methodFilter,
             status: statusFilter,
             search: traceSearch,
@@ -238,7 +246,7 @@ function App() {
         buildTraceParams({
           workspace,
           environment,
-          server: selectedServer,
+          serverId: '',
           method: methodFilter,
           status: statusFilter,
           search: traceSearch,
@@ -260,6 +268,9 @@ function App() {
       }
 
       const next = JSON.parse(event.data) as TraceRecord
+      if (selectedServerRef.current && next.server_id !== selectedServerRef.current) {
+        return
+      }
       setTraces((current) => {
         const deduped = current.filter((trace) => trace.id !== next.id)
         return [next, ...deduped].slice(0, Math.max(deduped.length, 50))
@@ -275,7 +286,7 @@ function App() {
       active = false
       source.close()
     }
-  }, [authToken, workspace, environment, selectedServer, methodFilter, statusFilter, traceSearch, traceAfter, traceBefore])
+  }, [authToken, workspace, environment, methodFilter, statusFilter, traceSearch, traceAfter, traceBefore])
 
   useEffect(() => {
     let active = true
@@ -288,7 +299,7 @@ function App() {
               environment,
               workspace,
               window: windowKey,
-              server: selectedServer,
+              server_id: selectedServer,
               method: methodFilter,
             }),
             authToken,
@@ -298,7 +309,7 @@ function App() {
               environment,
               workspace,
               window: windowKey,
-              server: selectedServer,
+              server_id: selectedServer,
               method: methodFilter,
             }),
             authToken,
@@ -373,19 +384,34 @@ function App() {
   }, [traces, alertEvaluations])
 
   const serverOptions = useMemo(() => {
-    const values = new Set<string>()
-    traces.forEach((trace) => values.add(trace.server_name))
-    latencyStats.forEach((record) => values.add(record.server_name))
-    alertRules.forEach((rule) => {
-      if (rule.server_name) {
-        values.add(rule.server_name)
+    const labels = new Map<string, string>()
+
+    const addServer = (serverId: string, serverName?: string) => {
+      const value = serverId.trim()
+      if (!value) {
+        return
       }
-    })
-    return ['', ...Array.from(values).sort()]
-  }, [traces, latencyStats, alertRules])
+      if (labels.has(value)) {
+        return
+      }
+      const name = serverName?.trim() || value
+      labels.set(value, name === value ? name : `${name} (${value})`)
+    }
+
+    traces.forEach((trace) => addServer(trace.server_id, trace.server_name))
+    latencyStats.forEach((record) => addServer(record.server_id, record.server_name))
+    errorStats.forEach((record) => addServer(record.server_id, record.server_id))
+
+    return [
+      { value: '', label: 'All servers' },
+      ...Array.from(labels.entries())
+        .sort((a, b) => a[1].localeCompare(b[1]))
+        .map(([value, label]) => ({ value, label })),
+    ]
+  }, [traces, latencyStats, errorStats])
 
   const latencyChartData = useMemo(() => {
-    const labels = latencyStats.map((record) => `${record.server_name} :: ${record.method}`)
+    const labels = latencyStats.map((record) => `${record.server_name || record.server_id} :: ${record.method}`)
     return {
       labels,
       datasets: [
@@ -418,7 +444,7 @@ function App() {
           buildTraceParams({
             workspace,
             environment,
-            server: selectedServer,
+            serverId: selectedServer,
             method: methodFilter,
             status: statusFilter,
             search: traceSearch,
@@ -603,8 +629,8 @@ function App() {
             <span>Server</span>
             <select value={selectedServer} onChange={(event) => setSelectedServer(event.target.value)}>
               {serverOptions.map((option) => (
-                <option key={option || 'all'} value={option}>
-                  {option || 'All servers'}
+                <option key={option.value || 'all'} value={option.value}>
+                  {option.label}
                 </option>
               ))}
             </select>
@@ -688,6 +714,10 @@ function App() {
             <strong>{environment || 'default'}</strong>
           </div>
           <div>
+            <span>Server</span>
+            <strong>{selectedServer ? (serverOptions.find((option) => option.value === selectedServer)?.label ?? selectedServer) : 'All servers'}</strong>
+          </div>
+          <div>
             <span>Stream</span>
             <strong data-state={streamState}>{streamState}</strong>
           </div>
@@ -721,11 +751,11 @@ function App() {
               className="load-more export-link"
               href={apiURL('/api/export/traces', authToken, {
                 environment,
-                workspace,
-                server: selectedServer,
-                method: methodFilter,
-                status: statusFilter,
-                search: traceSearch,
+            workspace,
+            server_id: selectedServer,
+            method: methodFilter,
+            status: statusFilter,
+            search: traceSearch,
                 created_after: toQueryTimestamp(traceAfter),
                 created_before: toQueryTimestamp(traceBefore),
                 limit: '200',
@@ -770,7 +800,12 @@ function App() {
                           <td className="mono">{trace.trace_id}</td>
                           <td>{trace.workspace}</td>
                           <td>{trace.environment}</td>
-                          <td>{trace.server_name}</td>
+                          <td>
+                            <div>{trace.server_name || trace.server_id}</div>
+                            {trace.server_name && trace.server_name !== trace.server_id ? (
+                              <div className="muted mono">{trace.server_id}</div>
+                            ) : null}
+                          </td>
                           <td>{trace.method || '(response)'}</td>
                           <td>{trace.latency_ms} ms</td>
                           <td>
@@ -885,7 +920,9 @@ function App() {
                   <div className="timeline-top">
                     <div>
                       <h3>{item.method}</h3>
-                      <p>{item.error_count} errors out of {item.count} calls</p>
+                      <p>
+                        {item.server_id} · {item.error_count} errors out of {item.count} calls
+                      </p>
                     </div>
                     <span className={item.error_rate_pct > 0 ? 'pill error' : 'pill success'}>
                       {item.error_rate_pct.toFixed(1)}%
@@ -1147,7 +1184,7 @@ function emptyAlertDraft(): AlertRuleDraft {
 function buildTraceParams(input: {
   workspace: string
   environment: string
-  server: string
+  serverId: string
   method: string
   status: StatusFilter
   search: string
@@ -1159,7 +1196,7 @@ function buildTraceParams(input: {
   return {
     workspace: input.workspace,
     environment: input.environment,
-    server: input.server,
+    server_id: input.serverId,
     method: input.method,
     status: input.status,
     search: input.search,

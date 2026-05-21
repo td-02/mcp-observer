@@ -260,6 +260,7 @@ func scanTrace(rows *sql.Rows) (store.Trace, error) {
 		&trace.TraceID,
 		&trace.Workspace,
 		&trace.Environment,
+		&trace.ServerID,
 		&trace.ServerName,
 		&trace.Method,
 		&trace.ParamsHash,

@@ -47,6 +47,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 			trace_id,
 			workspace,
 			environment,
+			server_id,
 			server_name,
 			method,
 			params_hash,
@@ -58,7 +59,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 			error_message,
 			sdk_reported,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.ExecContext(
@@ -68,6 +69,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 		trace.TraceID,
 		trace.Workspace,
 		trace.Environment,
+		trace.ServerID,
 		trace.ServerName,
 		trace.Method,
 		trace.ParamsHash,
@@ -99,6 +101,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 			trace_id,
 			workspace,
 			environment,
+			server_id,
 			server_name,
 			method,
 			params_hash,
@@ -423,10 +426,10 @@ func (s *SQLiteStore) QueryLatencyStats(ctx context.Context, filter QueryFilter)
 	query, args := buildWindowedTraceFilter(filter)
 	rows, err := s.db.QueryContext(ctx, `
 		WITH filtered AS (
-			SELECT environment, server_name, method, latency_ms,
+			SELECT environment, server_id, server_name, method, latency_ms,
 				workspace,
-				ROW_NUMBER() OVER (PARTITION BY workspace, environment, server_name, method ORDER BY latency_ms) AS rn,
-				COUNT(*) OVER (PARTITION BY workspace, environment, server_name, method) AS total
+				ROW_NUMBER() OVER (PARTITION BY workspace, environment, server_id, server_name, method ORDER BY latency_ms) AS rn,
+				COUNT(*) OVER (PARTITION BY workspace, environment, server_id, server_name, method) AS total
 			FROM traces
 	`+query+`
 		),
@@ -434,6 +437,7 @@ func (s *SQLiteStore) QueryLatencyStats(ctx context.Context, filter QueryFilter)
 			SELECT
 				workspace,
 				environment,
+				server_id,
 				server_name,
 				method,
 				total AS count,
@@ -441,11 +445,11 @@ func (s *SQLiteStore) QueryLatencyStats(ctx context.Context, filter QueryFilter)
 				MIN(CASE WHEN rn >= CAST(((total * 95) + 99) / 100 AS INTEGER) THEN latency_ms END) AS p95_ms,
 				MIN(CASE WHEN rn >= CAST(((total * 99) + 99) / 100 AS INTEGER) THEN latency_ms END) AS p99_ms
 			FROM filtered
-			GROUP BY workspace, environment, server_name, method, total
+			GROUP BY workspace, environment, server_id, server_name, method, total
 		)
-		SELECT workspace, environment, server_name, method, count, COALESCE(p50_ms, 0), COALESCE(p95_ms, 0), COALESCE(p99_ms, 0)
+		SELECT workspace, environment, server_id, server_name, method, count, COALESCE(p50_ms, 0), COALESCE(p95_ms, 0), COALESCE(p99_ms, 0)
 		FROM grouped
-		ORDER BY workspace, environment, server_name, method
+		ORDER BY workspace, environment, server_id, server_name, method
 	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query latency stats: %w", err)
@@ -455,7 +459,7 @@ func (s *SQLiteStore) QueryLatencyStats(ctx context.Context, filter QueryFilter)
 	var stats []LatencyStat
 	for rows.Next() {
 		var stat LatencyStat
-		if err := rows.Scan(&stat.Workspace, &stat.Environment, &stat.ServerName, &stat.Method, &stat.Count, &stat.P50Ms, &stat.P95Ms, &stat.P99Ms); err != nil {
+		if err := rows.Scan(&stat.Workspace, &stat.Environment, &stat.ServerID, &stat.ServerName, &stat.Method, &stat.Count, &stat.P50Ms, &stat.P95Ms, &stat.P99Ms); err != nil {
 			return nil, fmt.Errorf("scan latency stat: %w", err)
 		}
 		stats = append(stats, stat)
@@ -473,12 +477,13 @@ func (s *SQLiteStore) QueryErrorStats(ctx context.Context, filter QueryFilter) (
 			SELECT
 				environment,
 				workspace,
+				server_id,
 				method,
 				is_error,
 				error_message,
 				created_at,
 				ROW_NUMBER() OVER (
-					PARTITION BY workspace, environment, method
+					PARTITION BY workspace, environment, server_id, method
 					ORDER BY CASE WHEN is_error = 1 THEN created_at END DESC
 				) AS err_rank
 			FROM traces
@@ -487,6 +492,7 @@ func (s *SQLiteStore) QueryErrorStats(ctx context.Context, filter QueryFilter) (
 		SELECT
 			environment,
 			workspace,
+			server_id,
 			method,
 			COUNT(*) AS count,
 			SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END) AS error_count,
@@ -495,7 +501,7 @@ func (s *SQLiteStore) QueryErrorStats(ctx context.Context, filter QueryFilter) (
 			MAX(CASE WHEN is_error = 1 AND err_rank = 1 THEN created_at END) AS recent_error_at
 		FROM filtered
 		WHERE method <> ''
-		GROUP BY workspace, environment, method
+		GROUP BY workspace, environment, server_id, method
 		ORDER BY error_rate_pct DESC, method
 	`, args...)
 	if err != nil {
@@ -507,7 +513,7 @@ func (s *SQLiteStore) QueryErrorStats(ctx context.Context, filter QueryFilter) (
 	for rows.Next() {
 		var stat ErrorStat
 		var recentAt sql.NullString
-		if err := rows.Scan(&stat.Environment, &stat.Workspace, &stat.Method, &stat.Count, &stat.ErrorCount, &stat.ErrorRatePct, &stat.RecentErrorMessage, &recentAt); err != nil {
+		if err := rows.Scan(&stat.Environment, &stat.Workspace, &stat.ServerID, &stat.Method, &stat.Count, &stat.ErrorCount, &stat.ErrorRatePct, &stat.RecentErrorMessage, &recentAt); err != nil {
 			return nil, fmt.Errorf("scan error stat: %w", err)
 		}
 		if recentAt.Valid {
@@ -542,6 +548,7 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 			&trace.TraceID,
 			&trace.Workspace,
 			&trace.Environment,
+			&trace.ServerID,
 			&trace.ServerName,
 			&trace.Method,
 			&trace.ParamsHash,
@@ -583,6 +590,7 @@ func traceQuery(filter QueryFilter) (string, []any) {
 	if search := strings.TrimSpace(filter.Search); search != "" {
 		conditions = append(conditions, `(
 			trace_id LIKE ? OR
+			server_id LIKE ? OR
 			server_name LIKE ? OR
 			method LIKE ? OR
 			error_message LIKE ? OR
@@ -590,7 +598,7 @@ func traceQuery(filter QueryFilter) (string, []any) {
 			response_payload LIKE ?
 		)`)
 		pattern := "%" + search + "%"
-		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	if filter.Workspace != "" {
 		conditions = append(conditions, "workspace = ?")
@@ -599,6 +607,10 @@ func traceQuery(filter QueryFilter) (string, []any) {
 	if filter.Environment != "" {
 		conditions = append(conditions, "environment = ?")
 		args = append(args, filter.Environment)
+	}
+	if filter.ServerID != "" {
+		conditions = append(conditions, "server_id = ?")
+		args = append(args, filter.ServerID)
 	}
 	if filter.ServerName != "" {
 		conditions = append(conditions, "server_name = ?")
@@ -627,6 +639,7 @@ func traceQuery(filter QueryFilter) (string, []any) {
 			trace_id,
 			workspace,
 			environment,
+			server_id,
 			server_name,
 			method,
 			params_hash,
@@ -704,6 +717,10 @@ func buildWindowedTraceFilter(filter QueryFilter) (string, []any) {
 	if filter.Environment != "" {
 		conditions = append(conditions, "environment = ?")
 		args = append(args, filter.Environment)
+	}
+	if filter.ServerID != "" {
+		conditions = append(conditions, "server_id = ?")
+		args = append(args, filter.ServerID)
 	}
 	if filter.ServerName != "" {
 		conditions = append(conditions, "server_name = ?")

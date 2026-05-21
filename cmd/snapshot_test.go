@@ -22,7 +22,7 @@ func TestCreateSnapshotFromMockStdioServer(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), serverPath, "-test.run=TestHelperProcessSnapshotServer")
 	cmd.Env = append(os.Environ(), "MCPSCOPE_TEST_MOCK_MCP=1")
 
-	snapshot, err := snapshotFromCommand(context.Background(), cmd)
+	snapshot, err := snapshotFromCommand(context.Background(), cmd, "")
 	if err != nil {
 		t.Fatalf("snapshotFromCommand returned error: %v", err)
 	}

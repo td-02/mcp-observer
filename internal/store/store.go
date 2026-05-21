@@ -10,6 +10,7 @@ type Trace struct {
 	TraceID         string    `json:"trace_id"`
 	Workspace       string    `json:"workspace"`
 	Environment     string    `json:"environment"`
+	ServerID        string    `json:"server_id"`
 	ServerName      string    `json:"server_name"`
 	Method          string    `json:"method"`
 	ParamsHash      string    `json:"params_hash"`
@@ -28,6 +29,7 @@ type QueryFilter struct {
 	Search        string
 	Workspace     string
 	Environment   string
+	ServerID      string
 	ServerName    string
 	Method        string
 	IsError       *bool
@@ -80,6 +82,7 @@ type AlertEvent struct {
 type LatencyStat struct {
 	Workspace   string
 	Environment string
+	ServerID    string
 	ServerName  string
 	Method      string
 	Count       int
@@ -91,6 +94,7 @@ type LatencyStat struct {
 type ErrorStat struct {
 	Workspace          string
 	Environment        string
+	ServerID           string
 	Method             string
 	Count              int
 	ErrorCount         int

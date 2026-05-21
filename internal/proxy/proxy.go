@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,8 @@ type Config struct {
 	AlertingConfig  *alerting.Config
 	PublicURL       string
 	AlertingEngine  *alerting.Engine
+	Runtime         *Runtime
+	ServerID        string
 	NotifyRetries   int
 	NotifyBackoff   time.Duration
 	Dashboard       fs.FS
@@ -61,10 +64,25 @@ type Config struct {
 	Stderr          io.Writer
 }
 
-func Run(ctx context.Context, cfg Config) error {
-	cfg.eventHub = newTraceEventHub()
+type Runtime struct {
+	eventHub *traceEventHub
+	redactor *payloadRedactor
+}
+
+func NewRuntime(redactKeys []string) *Runtime {
+	return &Runtime{
+		eventHub: newTraceEventHub(),
+		redactor: newPayloadRedactor(redactKeys),
+	}
+}
+
+func prepareConfig(cfg *Config) {
+	if cfg.Runtime == nil {
+		cfg.Runtime = NewRuntime(cfg.RedactKeys)
+	}
+	cfg.eventHub = cfg.Runtime.eventHub
 	cfg.tracker = newTraceTracker()
-	cfg.redactor = newPayloadRedactor(cfg.RedactKeys)
+	cfg.redactor = cfg.Runtime.redactor
 	if strings.TrimSpace(cfg.Workspace) == "" {
 		cfg.Workspace = "default"
 	}
@@ -74,6 +92,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if strings.TrimSpace(cfg.Version) == "" {
 		cfg.Version = "dev"
 	}
+}
+
+func Run(ctx context.Context, cfg Config) error {
+	prepareConfig(&cfg)
 
 	if cfg.AlertingConfig != nil {
 		engine, err := alerting.NewEngine(*cfg.AlertingConfig, cfg.Store, alerting.Options{
@@ -106,6 +128,7 @@ type traceAPIRecord struct {
 	TraceID      string          `json:"trace_id"`
 	Workspace    string          `json:"workspace"`
 	Environment  string          `json:"environment"`
+	ServerID     string          `json:"server_id"`
 	ServerName   string          `json:"server_name"`
 	Method       string          `json:"method"`
 	Params       json.RawMessage `json:"params,omitempty"`
@@ -127,6 +150,7 @@ type ingestTraceRequest struct {
 	TraceID     string          `json:"trace_id,omitempty"`
 	Workspace   string          `json:"workspace,omitempty"`
 	Environment string          `json:"environment,omitempty"`
+	ServerID    string          `json:"server_id,omitempty"`
 	ServerName  string          `json:"server_name,omitempty"`
 }
 
@@ -139,6 +163,7 @@ type traceListResponse struct {
 }
 
 type latencyStatRecord struct {
+	ServerID   string `json:"server_id"`
 	ServerName string `json:"server_name"`
 	Method     string `json:"method"`
 	Count      int    `json:"count"`
@@ -148,6 +173,7 @@ type latencyStatRecord struct {
 }
 
 type errorStatRecord struct {
+	ServerID           string     `json:"server_id"`
 	Environment        string     `json:"environment"`
 	Method             string     `json:"method"`
 	Count              int        `json:"count"`
@@ -177,6 +203,7 @@ type traceEventHub struct {
 type pendingTrace struct {
 	id         string
 	traceID    string
+	serverID   string
 	server     string
 	method     string
 	params     json.RawMessage
@@ -193,9 +220,9 @@ func newTraceTracker() *traceTracker {
 	return &traceTracker{pending: make(map[string]pendingTrace)}
 }
 
-func (t *traceTracker) Record(serverName string, event intercept.Event) (traceAPIRecord, bool) {
+func (t *traceTracker) Record(serverID, serverName string, event intercept.Event) (traceAPIRecord, bool) {
 	if t == nil {
-		return traceRecordFromEvent(intercept.NewUUID(), serverName, event), true
+		return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, event), true
 	}
 
 	now := time.Unix(0, event.ReceivedAtUnixN).UTC()
@@ -209,6 +236,7 @@ func (t *traceTracker) Record(serverName string, event intercept.Event) (traceAP
 		t.pending[messageID] = pendingTrace{
 			id:         intercept.NewUUID(),
 			traceID:    event.TraceID,
+			serverID:   serverID,
 			server:     serverName,
 			method:     event.Method,
 			params:     cloneRawMessage(event.Params),
@@ -224,6 +252,7 @@ func (t *traceTracker) Record(serverName string, event intercept.Event) (traceAP
 			return traceAPIRecord{
 				ID:           request.id,
 				TraceID:      request.traceID,
+				ServerID:     request.serverID,
 				ServerName:   request.server,
 				Method:       request.method,
 				Params:       cloneRawMessage(request.params),
@@ -236,7 +265,7 @@ func (t *traceTracker) Record(serverName string, event intercept.Event) (traceAP
 		}
 	}
 
-	return traceRecordFromEvent(intercept.NewUUID(), serverName, event), true
+	return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, event), true
 }
 
 func (t *traceTracker) evictStaleLocked(now time.Time) {
@@ -279,7 +308,7 @@ func (h *traceEventHub) Publish(record traceAPIRecord) {
 }
 
 func runStdio(ctx context.Context, cfg Config) error {
-	server, serverErr, err := startHTTPServer(ctx, cfg, nil)
+	server, serverErr, err := StartHTTPServer(ctx, cfg, nil)
 	if err != nil {
 		return err
 	}
@@ -473,7 +502,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 
 	var mu sync.Mutex
 	client := &http.Client{}
-	server, serverErr, err := startHTTPServer(ctx, cfg, func(w http.ResponseWriter, r *http.Request) {
+	server, serverErr, err := StartHTTPServer(ctx, cfg, func(w http.ResponseWriter, r *http.Request) {
 		requestBody, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -485,7 +514,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 
 		upstreamURL := *targetBaseURL
 		upstreamURL.Path = r.URL.Path
-		upstreamURL.RawQuery = r.URL.RawQuery
+		upstreamURL.RawQuery = stripQueryParam(r.URL.RawQuery, "server_id")
 
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL.String(), bytes.NewReader(requestBody))
 		if err != nil {
@@ -570,12 +599,18 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		return err
 	}
 
-	record, persist := cfg.tracker.Record(cfg.ServerName, event)
+	record, persist := cfg.tracker.Record(cfg.ServerID, cfg.ServerName, event)
 	if !persist {
 		return nil
 	}
 	record.Workspace = cfg.Workspace
 	record.Environment = cfg.Environment
+	if record.ServerID == "" {
+		record.ServerID = cfg.ServerID
+	}
+	if record.ServerID == "" {
+		record.ServerID = serverIDFromName(cfg.ServerName)
+	}
 
 	if cfg.Telemetry != nil {
 		cfg.Telemetry.RecordCall(ctx, record.ServerName, eventFromRecord(record))
@@ -610,7 +645,8 @@ func validateUpstreamPort(port int) error {
 	return nil
 }
 
-func startHTTPServer(ctx context.Context, cfg Config, proxyPostHandler http.HandlerFunc) (*http.Server, <-chan error, error) {
+func StartHTTPServer(ctx context.Context, cfg Config, proxyPostHandler http.HandlerFunc) (*http.Server, <-chan error, error) {
+	prepareConfig(&cfg)
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen on port %d: %w", cfg.Port, err)
@@ -755,6 +791,7 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
 		Workspace:     filter.Workspace,
 		Environment:   filter.Environment,
+		ServerID:      filter.ServerID,
 		ServerName:    filter.ServerName,
 		Method:        filter.Method,
 		Search:        filter.Search,
@@ -819,6 +856,9 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 		case record, ok := <-ch:
 			if !ok {
 				return
+			}
+			if filter.ServerID != "" && record.ServerID != filter.ServerID {
+				continue
 			}
 			if filter.ServerName != "" && record.ServerName != filter.ServerName {
 				continue
@@ -1013,6 +1053,7 @@ func handleLatencyStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	records := make([]latencyStatRecord, 0, len(stats))
 	for _, stat := range stats {
 		records = append(records, latencyStatRecord{
+			ServerID:   stat.ServerID,
 			ServerName: stat.ServerName,
 			Method:     stat.Method,
 			Count:      stat.Count,
@@ -1045,6 +1086,7 @@ func handleErrorStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	records := make([]errorStatRecord, 0, len(stats))
 	for _, stat := range stats {
 		records = append(records, errorStatRecord{
+			ServerID:           stat.ServerID,
 			Environment:        stat.Environment,
 			Method:             stat.Method,
 			Count:              stat.Count,
@@ -1130,6 +1172,7 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 		Search:        filter.Search,
 		Workspace:     filter.Workspace,
 		Environment:   filter.Environment,
+		ServerID:      filter.ServerID,
 		ServerName:    filter.ServerName,
 		Method:        filter.Method,
 		IsError:       filter.IsError,
@@ -1249,12 +1292,13 @@ func serveDashboardAsset(w http.ResponseWriter, r *http.Request, static fs.FS, f
 	_, _ = w.Write(index)
 }
 
-func traceRecordFromEvent(id, serverName string, event intercept.Event) traceAPIRecord {
+func traceRecordFromEvent(id, serverID, serverName string, event intercept.Event) traceAPIRecord {
 	return traceAPIRecord{
 		ID:           id,
 		TraceID:      event.TraceID,
 		Workspace:    "",
 		Environment:  "",
+		ServerID:     serverID,
 		ServerName:   serverName,
 		Method:       event.Method,
 		Params:       cloneRawMessage(event.Params),
@@ -1273,6 +1317,7 @@ func traceRecordFromStored(trace store.Trace) traceAPIRecord {
 		TraceID:      trace.TraceID,
 		Workspace:    trace.Workspace,
 		Environment:  trace.Environment,
+		ServerID:     trace.ServerID,
 		ServerName:   trace.ServerName,
 		Method:       trace.Method,
 		Params:       asRawJSON(trace.ParamsPayload),
@@ -1313,6 +1358,68 @@ func cloneRawMessage(raw json.RawMessage) json.RawMessage {
 	out := make([]byte, len(raw))
 	copy(out, raw)
 	return out
+}
+
+func serverIDFromName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(name)
+	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		host := strings.TrimSpace(parsed.Hostname())
+		port := strings.TrimSpace(parsed.Port())
+		if host != "" && port != "" {
+			return sanitizeServerID(host + "-" + port)
+		}
+		if host != "" {
+			return sanitizeServerID(host)
+		}
+	}
+
+	return sanitizeServerID(filepath.Base(name))
+}
+
+func sanitizeServerID(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastHyphen := false
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastHyphen = false
+		default:
+			if !lastHyphen {
+				builder.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+
+	result := strings.Trim(builder.String(), "-")
+	if result == "" {
+		return "server"
+	}
+	return result
+}
+
+func stripQueryParam(rawQuery, key string) string {
+	if strings.TrimSpace(rawQuery) == "" {
+		return ""
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return rawQuery
+	}
+	values.Del(key)
+	return values.Encode()
 }
 
 func hashRawMessage(raw json.RawMessage) string {
@@ -1378,6 +1485,7 @@ func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTrace
 		TraceID:      strings.TrimSpace(input.TraceID),
 		Workspace:    strings.TrimSpace(input.Workspace),
 		Environment:  strings.TrimSpace(input.Environment),
+		ServerID:     strings.TrimSpace(input.ServerID),
 		ServerName:   strings.TrimSpace(input.ServerName),
 		Method:       method,
 		Params:       cloneRawMessage(input.Params),
@@ -1403,6 +1511,15 @@ func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTrace
 	}
 	if record.ServerName == "" {
 		record.ServerName = strings.TrimSpace(r.Header.Get("X-Mcpscope-Server-Name"))
+	}
+	if record.ServerID == "" {
+		record.ServerID = strings.TrimSpace(r.Header.Get("X-Mcpscope-Server-Id"))
+	}
+	if record.ServerID == "" {
+		record.ServerID = cfg.ServerID
+	}
+	if record.ServerID == "" {
+		record.ServerID = serverIDFromName(record.ServerName)
 	}
 	if record.ServerName == "" {
 		record.ServerName = cfg.ServerName
@@ -1434,6 +1551,7 @@ func persistTraceRecord(ctx context.Context, cfg Config, record traceAPIRecord) 
 		TraceID:         record.TraceID,
 		Workspace:       record.Workspace,
 		Environment:     record.Environment,
+		ServerID:        record.ServerID,
 		ServerName:      record.ServerName,
 		Method:          record.Method,
 		ParamsHash:      hashRawMessage(record.Params),
@@ -1488,6 +1606,7 @@ func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {
 	}
 
 	environment := environmentFromRequest(r, cfg)
+	serverID := strings.TrimSpace(r.URL.Query().Get("server_id"))
 	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 	method := strings.TrimSpace(r.URL.Query().Get("method"))
 	start := time.Now().Add(-window)
@@ -1495,6 +1614,7 @@ func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {
 	return store.QueryFilter{
 		Workspace:    workspaceFromRequest(r, cfg),
 		Environment:  environment,
+		ServerID:     serverID,
 		ServerName:   serverName,
 		Method:       method,
 		CreatedAfter: &start,
@@ -1545,6 +1665,7 @@ func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, 
 		Search:      strings.TrimSpace(query.Get("search")),
 		Workspace:   workspaceFromRequest(r, cfg),
 		Environment: environmentFromRequest(r, cfg),
+		ServerID:    strings.TrimSpace(query.Get("server_id")),
 		ServerName:  strings.TrimSpace(query.Get("server")),
 		Method:      strings.TrimSpace(query.Get("method")),
 	}
@@ -1607,6 +1728,7 @@ func traceRecordMatchesSearch(record traceAPIRecord, search string) bool {
 		record.TraceID,
 		record.Workspace,
 		record.Environment,
+		record.ServerID,
 		record.ServerName,
 		record.Method,
 		record.ErrorMessage,

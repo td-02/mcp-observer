@@ -195,3 +195,29 @@ func TestNormalizeKeys(t *testing.T) {
 		t.Fatalf("normalizeKeys = %v", got)
 	}
 }
+
+func TestAllocateWorkerPorts(t *testing.T) {
+	t.Parallel()
+
+	ports, err := allocateWorkerPorts(4444, 4444, 3)
+	if err != nil {
+		t.Fatalf("allocateWorkerPorts returned error: %v", err)
+	}
+	want := []int{4445, 4446, 4447}
+	if len(ports) != len(want) {
+		t.Fatalf("ports = %v, want %v", ports, want)
+	}
+	for i := range want {
+		if ports[i] != want[i] {
+			t.Fatalf("ports = %v, want %v", ports, want)
+		}
+	}
+}
+
+func TestAllocateWorkerPortsRejectsDashboardConflict(t *testing.T) {
+	t.Parallel()
+
+	if _, err := allocateWorkerPorts(4444, 4445, 1); err == nil {
+		t.Fatalf("expected conflict error")
+	}
+}

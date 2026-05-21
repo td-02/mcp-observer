@@ -25,6 +25,7 @@ const mcpProtocolVersion = "2024-11-05"
 
 type snapshotOutput struct {
 	Timestamp     string         `json:"timestamp"`
+	ServerID      string         `json:"server_id,omitempty"`
 	ServerName    string         `json:"server_name"`
 	ServerVersion string         `json:"server_version"`
 	Tools         []snapshotTool `json:"tools"`
@@ -71,6 +72,7 @@ func init() {
 
 func newSnapshotCmd() *cobra.Command {
 	var server string
+	var serverID string
 	var outputPath string
 	var format string
 
@@ -82,6 +84,7 @@ func newSnapshotCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target.serverID = strings.TrimSpace(serverID)
 
 			snapshot, err := createSnapshot(cmd.Context(), target)
 			if err != nil {
@@ -117,6 +120,7 @@ func newSnapshotCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&server, "server", "", "Path to the MCP server binary or an HTTP URL. Use `-- <command> <args...>` to include arguments")
+	cmd.Flags().StringVar(&serverID, "server-id", "", "Scope snapshots to a specific mcpscope worker server ID")
 	cmd.Flags().StringVar(&outputPath, "output", "", "Path to write the snapshot JSON file")
 	cmd.Flags().StringVar(&format, "format", "", "Optional output format. Use \"pretty\" to print a tool summary to stderr")
 
@@ -124,8 +128,9 @@ func newSnapshotCmd() *cobra.Command {
 }
 
 type snapshotTarget struct {
-	command []string
-	url     string
+	command  []string
+	url      string
+	serverID string
 }
 
 func resolveSnapshotTarget(server string, args []string) (snapshotTarget, error) {
@@ -152,22 +157,22 @@ func resolveSnapshotTarget(server string, args []string) (snapshotTarget, error)
 
 func createSnapshot(ctx context.Context, target snapshotTarget) (snapshotOutput, error) {
 	if target.url != "" {
-		return snapshotFromHTTP(ctx, target.url)
+		return snapshotFromHTTP(ctx, target.url, target.serverID)
 	}
 
-	return snapshotFromStdio(ctx, target.command)
+	return snapshotFromStdio(ctx, target.command, target.serverID)
 }
 
-func snapshotFromStdio(ctx context.Context, command []string) (snapshotOutput, error) {
+func snapshotFromStdio(ctx context.Context, command []string, serverID string) (snapshotOutput, error) {
 	if len(command) == 0 {
 		return snapshotOutput{}, errors.New("missing snapshot command")
 	}
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	return snapshotFromCommand(ctx, cmd)
+	return snapshotFromCommand(ctx, cmd, serverID)
 }
 
-func snapshotFromCommand(ctx context.Context, cmd *exec.Cmd) (snapshotOutput, error) {
+func snapshotFromCommand(ctx context.Context, cmd *exec.Cmd, serverID string) (snapshotOutput, error) {
 	serverIn, err := cmd.StdinPipe()
 	if err != nil {
 		return snapshotOutput{}, fmt.Errorf("create subprocess stdin pipe: %w", err)
@@ -189,7 +194,7 @@ func snapshotFromCommand(ctx context.Context, cmd *exec.Cmd) (snapshotOutput, er
 		writer: serverIn,
 	}
 
-	snapshot, runErr := runSnapshotFlow(ctx, client)
+	snapshot, runErr := runSnapshotFlow(ctx, client, serverID)
 	closeErr := serverIn.Close()
 	waitErr := cmd.Wait()
 
@@ -206,13 +211,24 @@ func snapshotFromCommand(ctx context.Context, cmd *exec.Cmd) (snapshotOutput, er
 	return snapshot, nil
 }
 
-func snapshotFromHTTP(ctx context.Context, server string) (snapshotOutput, error) {
+func snapshotFromHTTP(ctx context.Context, server, serverID string) (snapshotOutput, error) {
+	if strings.TrimSpace(serverID) != "" {
+		parsed, err := url.Parse(server)
+		if err != nil {
+			return snapshotOutput{}, fmt.Errorf("parse snapshot server url: %w", err)
+		}
+		query := parsed.Query()
+		query.Set("server_id", strings.TrimSpace(serverID))
+		parsed.RawQuery = query.Encode()
+		server = parsed.String()
+	}
+
 	client := &httpSnapshotClient{
 		baseURL: strings.TrimRight(server, "/"),
 		client:  &http.Client{Timeout: 15 * time.Second},
 	}
 
-	return runSnapshotFlow(ctx, client)
+	return runSnapshotFlow(ctx, client, serverID)
 }
 
 type snapshotTransport interface {
@@ -220,7 +236,7 @@ type snapshotTransport interface {
 	Notify(context.Context, rpcRequest) error
 }
 
-func runSnapshotFlow(ctx context.Context, transport snapshotTransport) (snapshotOutput, error) {
+func runSnapshotFlow(ctx context.Context, transport snapshotTransport, serverID string) (snapshotOutput, error) {
 	initReq := rpcRequest{
 		JSONRPC: "2.0",
 		ID:      1,
@@ -269,6 +285,7 @@ func runSnapshotFlow(ctx context.Context, transport snapshotTransport) (snapshot
 
 	return snapshotOutput{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		ServerID:      serverID,
 		ServerName:    initResult.ServerInfo.Name,
 		ServerVersion: initResult.ServerInfo.Version,
 		Tools:         toolsResult.Tools,
