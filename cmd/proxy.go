@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"mcpscope/internal/alerting"
+	"mcpscope/internal/budget"
 	"mcpscope/internal/proxy"
 	"mcpscope/internal/store"
 	"mcpscope/internal/telemetry"
@@ -45,6 +46,7 @@ func newProxyCmd() *cobra.Command {
 	var notifyWebhooks []string
 	var slackWebhooks []string
 	var pagerDutyKeys []string
+	var budgetsConfigPath string
 
 	cmd := &cobra.Command{
 		Use:   "proxy [command...]",
@@ -98,6 +100,10 @@ func newProxyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			budgetsConfig, err := budget.LoadConfig(budgetsConfigPath)
+			if err != nil {
+				return err
+			}
 
 			retentionAge, err := parseRetentionDuration(retainFor)
 			if err != nil {
@@ -142,6 +148,7 @@ func newProxyCmd() *cobra.Command {
 					MaxTraceCount:   maxTraces,
 					RedactKeys:      normalizeKeys(redactKeys),
 					AlertingConfig:  alertsConfig,
+					BudgetConfig:    budgetsConfig,
 					PublicURL:       strings.TrimSpace(publicURL),
 					NotifyWebhooks:  normalizeURLs(notifyWebhooks),
 					SlackWebhooks:   normalizeURLs(slackWebhooks),
@@ -174,6 +181,7 @@ func newProxyCmd() *cobra.Command {
 				MaxTraceCount:   maxTraces,
 				RedactKeys:      normalizeKeys(redactKeys),
 				AlertingConfig:  alertsConfig,
+				BudgetConfig:    budgetsConfig,
 				PublicURL:       strings.TrimSpace(publicURL),
 				NotifyWebhooks:  normalizeURLs(notifyWebhooks),
 				SlackWebhooks:   normalizeURLs(slackWebhooks),
@@ -200,6 +208,7 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&environment, "environment", "default", "Logical environment name for traces, alerts, and replay/export operations")
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token required for dashboard APIs when set")
 	cmd.Flags().StringVar(&alertsConfigPath, "alerts-config", "", "Path to a YAML file describing external alert rules")
+	cmd.Flags().StringVar(&budgetsConfigPath, "budgets-config", "", "Path to a YAML file describing per-team budgets")
 	cmd.Flags().StringVar(&publicURL, "public-url", "", "Public dashboard URL used in alert notifications")
 	cmd.Flags().StringSliceVar(&notifyWebhooks, "notify-webhook", nil, "Webhook URL that receives alert state changes. Repeatable")
 	cmd.Flags().StringSliceVar(&slackWebhooks, "notify-slack-webhook", nil, "Slack webhook URL that receives alert state changes. Repeatable")
@@ -380,6 +389,7 @@ type multiServerOptions struct {
 	MaxTraceCount   int
 	RedactKeys      []string
 	AlertingConfig  *alerting.Config
+	BudgetConfig    *budget.Config
 	PublicURL       string
 	NotifyWebhooks  []string
 	SlackWebhooks   []string
@@ -442,6 +452,7 @@ func runMultiServerProxy(ctx context.Context, opts multiServerOptions) error {
 		MaxTraceCount:   opts.MaxTraceCount,
 		RedactKeys:      opts.RedactKeys,
 		AlertingEngine:  alertEngine,
+		BudgetConfig:    opts.BudgetConfig,
 		PublicURL:       opts.PublicURL,
 		NotifyWebhooks:  opts.NotifyWebhooks,
 		SlackWebhooks:   opts.SlackWebhooks,
@@ -487,6 +498,7 @@ func runMultiServerProxy(ctx context.Context, opts multiServerOptions) error {
 				RetentionMaxAge: opts.RetentionMaxAge,
 				MaxTraceCount:   opts.MaxTraceCount,
 				RedactKeys:      opts.RedactKeys,
+				BudgetConfig:    opts.BudgetConfig,
 				PublicURL:       opts.PublicURL,
 				NotifyWebhooks:  opts.NotifyWebhooks,
 				SlackWebhooks:   opts.SlackWebhooks,

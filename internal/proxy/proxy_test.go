@@ -25,7 +25,7 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 		requestAt.Add(2*time.Millisecond),
 		[]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"alpha"}}`),
 	)
-	if _, persist := tracker.Record("demo-server-id", "demo-server", request); persist {
+	if _, persist := tracker.Record("demo-server-id", "demo-server", "", request); persist {
 		t.Fatalf("expected request frame to be held until the response arrives")
 	}
 
@@ -36,7 +36,7 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 		responseAt.Add(3*time.Millisecond),
 		[]byte(`{"jsonrpc":"2.0","id":7,"result":{"ok":true}}`),
 	)
-	record, persist := tracker.Record("demo-server-id", "demo-server", response)
+	record, persist := tracker.Record("demo-server-id", "demo-server", "", response)
 	if !persist {
 		t.Fatalf("expected correlated response to produce a trace")
 	}
@@ -73,7 +73,7 @@ func TestTraceTrackerPersistsNotificationsImmediately(t *testing.T) {
 		[]byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"source":"test"}}`),
 	)
 
-	record, persist := tracker.Record("demo-server-id", "demo-server", event)
+	record, persist := tracker.Record("demo-server-id", "demo-server", "", event)
 	if !persist {
 		t.Fatalf("expected notification to persist immediately")
 	}
@@ -107,6 +107,7 @@ func TestCaptureAndPersistStoresServerID(t *testing.T) {
 	if err := captureAndPersist(
 		context.Background(),
 		cfg,
+		"",
 		"http",
 		"client_to_server",
 		time.Date(2026, 3, 31, 11, 0, 0, 0, time.UTC),
@@ -214,4 +215,20 @@ func (c capturingTraceStore) QueryLatencyStats(context.Context, store.QueryFilte
 
 func (c capturingTraceStore) QueryErrorStats(context.Context, store.QueryFilter) ([]store.ErrorStat, error) {
 	return nil, nil
+}
+
+func (c capturingTraceStore) GetBudgetUsage(context.Context, string, string, time.Time) (store.BudgetUsage, error) {
+	return store.BudgetUsage{}, nil
+}
+
+func (c capturingTraceStore) ListBudgetUsage(context.Context) ([]store.BudgetUsage, error) {
+	return nil, nil
+}
+
+func (c capturingTraceStore) IncrementBudgetUsage(context.Context, store.BudgetUsage) error {
+	return nil
+}
+
+func (c capturingTraceStore) ResetBudgetWindow(context.Context, string, string, time.Time) error {
+	return nil
 }

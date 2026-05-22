@@ -24,6 +24,7 @@ import (
 
 	"mcpscope/internal/alerting"
 	"mcpscope/internal/auditexport"
+	"mcpscope/internal/budget"
 	"mcpscope/internal/intercept"
 	"mcpscope/internal/replay"
 	"mcpscope/internal/store"
@@ -49,8 +50,10 @@ type Config struct {
 	SlackWebhooks   []string
 	PagerDutyKeys   []string
 	AlertingConfig  *alerting.Config
+	BudgetConfig    *budget.Config
 	PublicURL       string
 	AlertingEngine  *alerting.Engine
+	BudgetManager   *budget.Manager
 	Runtime         *Runtime
 	ServerID        string
 	NotifyRetries   int
@@ -83,6 +86,9 @@ func prepareConfig(cfg *Config) {
 	cfg.eventHub = cfg.Runtime.eventHub
 	cfg.tracker = newTraceTracker()
 	cfg.redactor = cfg.Runtime.redactor
+	if cfg.BudgetManager == nil && cfg.BudgetConfig != nil && cfg.Store != nil {
+		cfg.BudgetManager = budget.NewManager(cfg.BudgetConfig, cfg.Store)
+	}
 	if strings.TrimSpace(cfg.Workspace) == "" {
 		cfg.Workspace = "default"
 	}
@@ -130,7 +136,9 @@ type traceAPIRecord struct {
 	Environment  string          `json:"environment"`
 	ServerID     string          `json:"server_id"`
 	ServerName   string          `json:"server_name"`
+	TeamID       string          `json:"team_id,omitempty"`
 	Method       string          `json:"method"`
+	Status       string          `json:"status"`
 	Params       json.RawMessage `json:"params,omitempty"`
 	Response     json.RawMessage `json:"response,omitempty"`
 	LatencyMs    int64           `json:"latency_ms"`
@@ -160,6 +168,15 @@ type traceListResponse struct {
 	Limit      int              `json:"limit"`
 	HasMore    bool             `json:"has_more"`
 	NextOffset int              `json:"next_offset"`
+}
+
+type budgetAPIRecord struct {
+	TeamID      string              `json:"team_id"`
+	Header      string              `json:"header"`
+	WindowType  string              `json:"window_type"`
+	WindowStart time.Time           `json:"window_start"`
+	Usage       store.BudgetUsage   `json:"usage"`
+	Limits      budget.BudgetLimits `json:"limits"`
 }
 
 type latencyStatRecord struct {
@@ -205,6 +222,7 @@ type pendingTrace struct {
 	traceID    string
 	serverID   string
 	server     string
+	teamID     string
 	method     string
 	params     json.RawMessage
 	paramsHash string
@@ -220,9 +238,9 @@ func newTraceTracker() *traceTracker {
 	return &traceTracker{pending: make(map[string]pendingTrace)}
 }
 
-func (t *traceTracker) Record(serverID, serverName string, event intercept.Event) (traceAPIRecord, bool) {
+func (t *traceTracker) Record(serverID, serverName, teamID string, event intercept.Event) (traceAPIRecord, bool) {
 	if t == nil {
-		return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, event), true
+		return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, teamID, event), true
 	}
 
 	now := time.Unix(0, event.ReceivedAtUnixN).UTC()
@@ -238,6 +256,7 @@ func (t *traceTracker) Record(serverID, serverName string, event intercept.Event
 			traceID:    event.TraceID,
 			serverID:   serverID,
 			server:     serverName,
+			teamID:     teamID,
 			method:     event.Method,
 			params:     cloneRawMessage(event.Params),
 			paramsHash: event.ParamsHash,
@@ -254,6 +273,7 @@ func (t *traceTracker) Record(serverID, serverName string, event intercept.Event
 				TraceID:      request.traceID,
 				ServerID:     request.serverID,
 				ServerName:   request.server,
+				TeamID:       request.teamID,
 				Method:       request.method,
 				Params:       cloneRawMessage(request.params),
 				Response:     cloneRawMessage(selectResponsePayload(event)),
@@ -265,7 +285,7 @@ func (t *traceTracker) Record(serverID, serverName string, event intercept.Event
 		}
 	}
 
-	return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, event), true
+	return traceRecordFromEvent(intercept.NewUUID(), serverID, serverName, teamID, event), true
 }
 
 func (t *traceTracker) evictStaleLocked(now time.Time) {
@@ -338,13 +358,14 @@ func runStdio(ctx context.Context, cfg Config) error {
 	}
 
 	copyErr := make(chan error, 2)
+	stdoutMu := &sync.Mutex{}
 
 	go func() {
-		copyErr <- forwardStdio(ctx, cfg, cfg.Stdin, serverIn, "client_to_server")
+		copyErr <- forwardStdio(ctx, cfg, cfg.Stdin, serverIn, cfg.Stdout, stdoutMu, "client_to_server")
 	}()
 
 	go func() {
-		copyErr <- forwardStdio(ctx, cfg, serverOut, cfg.Stdout, "server_to_client")
+		copyErr <- forwardStdio(ctx, cfg, serverOut, cfg.Stdout, cfg.Stdout, stdoutMu, "server_to_client")
 	}()
 
 	var firstErr error
@@ -371,7 +392,7 @@ func runStdio(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func forwardStdio(ctx context.Context, cfg Config, src io.Reader, dst io.Writer, direction string) error {
+func forwardStdio(ctx context.Context, cfg Config, src io.Reader, dst io.Writer, responseWriter io.Writer, responseMu *sync.Mutex, direction string) error {
 	reader := bufio.NewReader(src)
 	writeCloser, canClose := dst.(io.WriteCloser)
 
@@ -388,6 +409,20 @@ func forwardStdio(ctx context.Context, cfg Config, src io.Reader, dst io.Writer,
 			return err
 		}
 
+		teamID := ""
+		if direction == "client_to_server" {
+			info, ok := budgetRequestInfoFromPayload(frame.payload, cfg.BudgetConfig)
+			if ok {
+				teamID = info.TeamID
+				if handled, blockedErr := maybeBlockBudgetedRequest(ctx, cfg, info, teamID, frame.payload, receivedAt, nil, responseWriter, responseMu); handled {
+					if blockedErr != nil {
+						return blockedErr
+					}
+					continue
+				}
+			}
+		}
+
 		if _, err := dst.Write(frame.header); err != nil {
 			return fmt.Errorf("write frame header: %w", err)
 		}
@@ -401,7 +436,7 @@ func forwardStdio(ctx context.Context, cfg Config, src io.Reader, dst io.Writer,
 		}
 
 		sentAt := time.Now()
-		captureAndPersistBestEffort(ctx, cfg, "stdio", direction, receivedAt, sentAt, frame.payload)
+		captureAndPersistBestEffort(ctx, cfg, teamID, "stdio", direction, receivedAt, sentAt, frame.payload)
 	}
 }
 
@@ -511,6 +546,14 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		defer r.Body.Close()
 
 		requestReceivedAt := time.Now()
+		teamID := resolveBudgetTeamFromHTTPRequest(r, cfg.BudgetConfig)
+
+		if handled, blockedErr := maybeBlockBudgetedRequestHTTP(r.Context(), cfg, r, requestBody, requestReceivedAt, w); handled {
+			if blockedErr != nil {
+				logProxyWarning(cfg.Stderr, "budget block response failed", blockedErr)
+			}
+			return
+		}
 
 		upstreamURL := *targetBaseURL
 		upstreamURL.Path = r.URL.Path
@@ -529,7 +572,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		resp, err := client.Do(req)
 		mu.Unlock()
 		requestSentAt := time.Now()
-		captureAndPersistBestEffort(r.Context(), cfg, "http", "client_to_server", requestReceivedAt, requestSentAt, requestBody)
+		captureAndPersistBestEffort(r.Context(), cfg, teamID, "http", "client_to_server", requestReceivedAt, requestSentAt, requestBody)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("proxy upstream request: %v", err), http.StatusBadGateway)
 			return
@@ -555,7 +598,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		}
 
 		responseSentAt := time.Now()
-		captureAndPersistBestEffort(r.Context(), cfg, "http", "server_to_client", responseReceivedAt, responseSentAt, responseBody)
+		captureAndPersistBestEffort(r.Context(), cfg, teamID, "http", "server_to_client", responseReceivedAt, responseSentAt, responseBody)
 	})
 	if err != nil {
 		return err
@@ -591,7 +634,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 	}
 }
 
-func captureAndPersist(ctx context.Context, cfg Config, transport, direction string, receivedAt, sentAt time.Time, payload []byte) error {
+func captureAndPersist(ctx context.Context, cfg Config, teamID, transport, direction string, receivedAt, sentAt time.Time, payload []byte) error {
 	event := intercept.Capture(transport, direction, receivedAt, sentAt, payload)
 	event = cfg.redactor.Event(event)
 
@@ -599,7 +642,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		return err
 	}
 
-	record, persist := cfg.tracker.Record(cfg.ServerID, cfg.ServerName, event)
+	record, persist := cfg.tracker.Record(cfg.ServerID, cfg.ServerName, teamID, event)
 	if !persist {
 		return nil
 	}
@@ -615,11 +658,21 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if cfg.Telemetry != nil {
 		cfg.Telemetry.RecordCall(ctx, record.ServerName, eventFromRecord(record))
 	}
-	return persistTraceRecord(ctx, cfg, record)
+	if err := persistTraceRecord(ctx, cfg, record); err != nil {
+		return err
+	}
+	if cfg.BudgetManager != nil && direction == "server_to_client" {
+		if tokens := extractTokenCountFromRaw(selectResponsePayload(event)); tokens > 0 {
+			if err := cfg.BudgetManager.RecordTokens(ctx, record.TeamID, tokens, record.CreatedAt); err != nil {
+				logProxyWarning(cfg.Stderr, "budget token capture failed", err)
+			}
+		}
+	}
+	return nil
 }
 
-func captureAndPersistBestEffort(ctx context.Context, cfg Config, transport, direction string, receivedAt, sentAt time.Time, payload []byte) {
-	if err := captureAndPersist(ctx, cfg, transport, direction, receivedAt, sentAt, payload); err != nil {
+func captureAndPersistBestEffort(ctx context.Context, cfg Config, teamID, transport, direction string, receivedAt, sentAt time.Time, payload []byte) {
+	if err := captureAndPersist(ctx, cfg, teamID, transport, direction, receivedAt, sentAt, payload); err != nil {
 		logProxyWarning(cfg.Stderr, "trace capture failed", err)
 	}
 }
@@ -636,6 +689,231 @@ func stderrWriter(cfg Config) io.Writer {
 		return cfg.Stderr
 	}
 	return io.Discard
+}
+
+type budgetRequestInfo struct {
+	ID     json.RawMessage
+	Method string
+	TeamID string
+}
+
+func maybeBlockBudgetedRequestHTTP(ctx context.Context, cfg Config, r *http.Request, payload []byte, receivedAt time.Time, w http.ResponseWriter) (bool, error) {
+	info, ok := budgetRequestInfoFromPayload(payload, cfg.BudgetConfig)
+	if !ok {
+		return false, nil
+	}
+
+	teamID := resolveBudgetTeamFromHTTPRequest(r, cfg.BudgetConfig)
+	if handled, err := maybeBlockBudgetedRequest(ctx, cfg, info, teamID, payload, receivedAt, w, nil, nil); handled {
+		return true, err
+	}
+
+	return false, nil
+}
+
+func maybeBlockBudgetedRequest(ctx context.Context, cfg Config, info budgetRequestInfo, teamID string, payload []byte, receivedAt time.Time, w http.ResponseWriter, responseWriter io.Writer, responseMu *sync.Mutex) (bool, error) {
+	if cfg.BudgetManager == nil {
+		return false, nil
+	}
+
+	decision, err := cfg.BudgetManager.CheckAndReserve(ctx, teamID, receivedAt.UTC())
+	if err != nil {
+		return false, err
+	}
+	if decision.Allowed {
+		return false, nil
+	}
+
+	responseBody := budgetErrorResponseBody(info.ID, decision.Reason)
+	if w != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(responseBody); err != nil {
+			return true, fmt.Errorf("write blocked response: %w", err)
+		}
+	}
+	if responseWriter != nil {
+		writeMu := responseMu
+		if writeMu != nil {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+		}
+		if err := writeFramedPayload(responseWriter, responseBody); err != nil {
+			return true, err
+		}
+	}
+
+	traceID := intercept.NewUUID()
+	record := traceAPIRecord{
+		ID:           traceID,
+		TraceID:      traceID,
+		Workspace:    cfg.Workspace,
+		Environment:  cfg.Environment,
+		TeamID:       decision.TeamID,
+		ServerID:     cfg.ServerID,
+		ServerName:   cfg.ServerName,
+		Method:       info.Method,
+		Status:       "blocked",
+		Params:       cloneRawMessage(json.RawMessage(payload)),
+		Response:     cloneRawMessage(json.RawMessage(responseBody)),
+		LatencyMs:    0,
+		IsError:      true,
+		ErrorMessage: decision.Reason,
+		CreatedAt:    receivedAt.UTC(),
+	}
+	if err := persistTraceRecord(ctx, cfg, record); err != nil {
+		return true, err
+	}
+
+	return true, nil
+}
+
+func writeFramedPayload(w io.Writer, payload []byte) error {
+	if w == nil {
+		return nil
+	}
+	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(payload))
+	if _, err := io.WriteString(w, header); err != nil {
+		return fmt.Errorf("write blocked frame header: %w", err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		return fmt.Errorf("write blocked frame payload: %w", err)
+	}
+	return nil
+}
+
+func budgetErrorResponseBody(id json.RawMessage, reason string) []byte {
+	response := map[string]any{
+		"jsonrpc": "2.0",
+		"error": map[string]any{
+			"code":    -32000,
+			"message": reason,
+		},
+	}
+	if len(id) > 0 {
+		response["id"] = json.RawMessage(id)
+	} else {
+		response["id"] = nil
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		fallback, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"code":    -32000,
+				"message": reason,
+			},
+		})
+		return fallback
+	}
+	return encoded
+}
+
+func budgetRequestInfoFromPayload(payload []byte, cfg *budget.Config) (budgetRequestInfo, bool) {
+	if cfg == nil || len(cfg.Budgets) == 0 {
+		return budgetRequestInfo{}, false
+	}
+
+	parsed, err := intercept.ParseMessage(payload)
+	if err != nil {
+		return budgetRequestInfo{}, false
+	}
+	if len(parsed.ID) == 0 {
+		return budgetRequestInfo{}, false
+	}
+
+	info := budgetRequestInfo{
+		ID:     cloneRawMessage(parsed.ID),
+		Method: strings.TrimSpace(parsed.Method),
+		TeamID: resolveBudgetTeamFromStdioPayload(payload, cfg),
+	}
+	if info.TeamID == "" {
+		info.TeamID = "default"
+	}
+	return info, true
+}
+
+func resolveBudgetTeamFromHTTPRequest(r *http.Request, cfg *budget.Config) string {
+	if cfg == nil {
+		return "default"
+	}
+	for _, entry := range cfg.Budgets {
+		header := strings.TrimSpace(entry.Header)
+		if header == "" {
+			continue
+		}
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" && value == strings.TrimSpace(entry.Team) {
+			return strings.TrimSpace(entry.Team)
+		}
+	}
+	return "default"
+}
+
+func resolveBudgetTeamFromStdioPayload(payload []byte, cfg *budget.Config) string {
+	if cfg == nil {
+		return "default"
+	}
+
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return "default"
+	}
+
+	for _, entry := range cfg.Budgets {
+		header := strings.TrimSpace(entry.Header)
+		if header == "" {
+			continue
+		}
+		if value, ok := findJSONStringCaseInsensitive(root, header); ok && strings.TrimSpace(value) == strings.TrimSpace(entry.Team) {
+			return strings.TrimSpace(entry.Team)
+		}
+		for _, key := range []string{"metadata", "_meta", "meta", "params"} {
+			if nested, ok := root[key]; ok {
+				var nestedObj map[string]json.RawMessage
+				if err := json.Unmarshal(nested, &nestedObj); err != nil {
+					continue
+				}
+				if value, ok := findJSONStringCaseInsensitive(nestedObj, header); ok && strings.TrimSpace(value) == strings.TrimSpace(entry.Team) {
+					return strings.TrimSpace(entry.Team)
+				}
+			}
+		}
+	}
+
+	return "default"
+}
+
+func findJSONStringCaseInsensitive(obj map[string]json.RawMessage, key string) (string, bool) {
+	if len(obj) == 0 {
+		return "", false
+	}
+	for candidate, raw := range obj {
+		if !strings.EqualFold(candidate, key) {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func traceStatusFromEvent(event intercept.Event) string {
+	if event.IsError {
+		return "error"
+	}
+	return "success"
+}
+
+func traceStatusOrDefault(status string, isError bool) string {
+	status = strings.TrimSpace(status)
+	if status != "" {
+		return status
+	}
+	if isError {
+		return "error"
+	}
+	return "success"
 }
 
 func validateUpstreamPort(port int) error {
@@ -714,6 +992,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleAlertEvents(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alert-rules":
 			handleConfiguredAlertRules(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/budgets":
+			handleBudgets(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/latency":
 			handleLatencyStats(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/errors":
@@ -791,6 +1071,7 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
 		Workspace:     filter.Workspace,
 		Environment:   filter.Environment,
+		Status:        filter.Status,
 		ServerID:      filter.ServerID,
 		ServerName:    filter.ServerName,
 		Method:        filter.Method,
@@ -870,6 +1151,9 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 				continue
 			}
 			if filter.Method != "" && record.Method != filter.Method {
+				continue
+			}
+			if filter.Status != "" && record.Status != filter.Status {
 				continue
 			}
 			if filter.IsError != nil && record.IsError != *filter.IsError {
@@ -1033,6 +1317,34 @@ func handleConfiguredAlertRules(w http.ResponseWriter, r *http.Request, cfg Conf
 	_ = json.NewEncoder(w).Encode(cfg.AlertingEngine.Snapshot())
 }
 
+func handleBudgets(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.BudgetManager == nil {
+		_ = json.NewEncoder(w).Encode([]budgetAPIRecord{})
+		return
+	}
+
+	snapshots, err := cfg.BudgetManager.Snapshot(r.Context(), time.Now().UTC())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	records := make([]budgetAPIRecord, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		records = append(records, budgetAPIRecord{
+			TeamID:      snapshot.TeamID,
+			Header:      snapshot.Header,
+			WindowType:  string(snapshot.WindowType),
+			WindowStart: snapshot.WindowStart,
+			Usage:       snapshot.Usage,
+			Limits:      snapshot.Limits,
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(records)
+}
+
 func handleLatencyStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Content-Type", "application/json")
 	if cfg.Store == nil {
@@ -1175,6 +1487,7 @@ func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
 		ServerID:      filter.ServerID,
 		ServerName:    filter.ServerName,
 		Method:        filter.Method,
+		Status:        filter.Status,
 		IsError:       filter.IsError,
 		CreatedAfter:  filter.CreatedAfter,
 		CreatedBefore: filter.CreatedBefore,
@@ -1292,7 +1605,7 @@ func serveDashboardAsset(w http.ResponseWriter, r *http.Request, static fs.FS, f
 	_, _ = w.Write(index)
 }
 
-func traceRecordFromEvent(id, serverID, serverName string, event intercept.Event) traceAPIRecord {
+func traceRecordFromEvent(id, serverID, serverName, teamID string, event intercept.Event) traceAPIRecord {
 	return traceAPIRecord{
 		ID:           id,
 		TraceID:      event.TraceID,
@@ -1300,7 +1613,9 @@ func traceRecordFromEvent(id, serverID, serverName string, event intercept.Event
 		Environment:  "",
 		ServerID:     serverID,
 		ServerName:   serverName,
+		TeamID:       teamID,
 		Method:       event.Method,
+		Status:       traceStatusFromEvent(event),
 		Params:       cloneRawMessage(event.Params),
 		Response:     cloneRawMessage(selectResponsePayload(event)),
 		LatencyMs:    event.LatencyMs,
@@ -1319,7 +1634,9 @@ func traceRecordFromStored(trace store.Trace) traceAPIRecord {
 		Environment:  trace.Environment,
 		ServerID:     trace.ServerID,
 		ServerName:   trace.ServerName,
+		TeamID:       trace.TeamID,
 		Method:       trace.Method,
+		Status:       traceStatusOrDefault(trace.Status, trace.IsError),
 		Params:       asRawJSON(trace.ParamsPayload),
 		Response:     asRawJSON(trace.ResponsePayload),
 		LatencyMs:    trace.LatencyMs,
@@ -1335,6 +1652,116 @@ func selectResponsePayload(event intercept.Event) json.RawMessage {
 		return event.Result
 	}
 	return event.Error
+}
+
+func extractTokenCountFromRaw(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0
+	}
+
+	return extractTokenCountFromValue(value)
+}
+
+func extractTokenCountFromValue(value any) int64 {
+	switch typed := value.(type) {
+	case map[string]any:
+		if count, ok := numericTokenField(typed, "token_count"); ok {
+			return count
+		}
+		if count, ok := numericTokenField(typed, "tokenCount"); ok {
+			return count
+		}
+		if count, ok := numericTokenField(typed, "total_tokens"); ok {
+			return count
+		}
+		if usage, ok := typed["usage"]; ok {
+			if count := extractUsageTokenCount(usage); count > 0 {
+				return count
+			}
+		}
+		for _, nested := range typed {
+			if count := extractTokenCountFromValue(nested); count > 0 {
+				return count
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if count := extractTokenCountFromValue(item); count > 0 {
+				return count
+			}
+		}
+	}
+	return 0
+}
+
+func extractUsageTokenCount(value any) int64 {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"total_tokens", "token_count", "tokenCount"} {
+			if count, ok := numericTokenField(typed, key); ok {
+				return count
+			}
+		}
+		if prompt, ok := numericTokenField(typed, "prompt_tokens"); ok {
+			if completion, ok := numericTokenField(typed, "completion_tokens"); ok {
+				return prompt + completion
+			}
+			return prompt
+		}
+		if inputTokens, ok := numericTokenField(typed, "input_tokens"); ok {
+			if outputTokens, ok := numericTokenField(typed, "output_tokens"); ok {
+				return inputTokens + outputTokens
+			}
+			return inputTokens
+		}
+		for _, nested := range typed {
+			if count := extractTokenCountFromValue(nested); count > 0 {
+				return count
+			}
+		}
+	case []any:
+		var total int64
+		for _, item := range typed {
+			total += extractUsageTokenCount(item)
+		}
+		return total
+	}
+	return 0
+}
+
+func numericTokenField(obj map[string]any, key string) (int64, bool) {
+	value, ok := obj[key]
+	if !ok {
+		for candidate, nested := range obj {
+			if !strings.EqualFold(candidate, key) {
+				continue
+			}
+			value = nested
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed), true
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 func rawMessageString(raw json.RawMessage) string {
@@ -1485,9 +1912,11 @@ func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTrace
 		TraceID:      strings.TrimSpace(input.TraceID),
 		Workspace:    strings.TrimSpace(input.Workspace),
 		Environment:  strings.TrimSpace(input.Environment),
+		TeamID:       strings.TrimSpace(r.Header.Get("X-Team-ID")),
 		ServerID:     strings.TrimSpace(input.ServerID),
 		ServerName:   strings.TrimSpace(input.ServerName),
 		Method:       method,
+		Status:       "success",
 		Params:       cloneRawMessage(input.Params),
 		Response:     cloneRawMessage(input.Response),
 		LatencyMs:    maxInt64(input.DurationMs, 0),
@@ -1495,6 +1924,9 @@ func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTrace
 		ErrorMessage: strings.TrimSpace(input.Error),
 		SdkReported:  true,
 		CreatedAt:    timestamp,
+	}
+	if record.IsError {
+		record.Status = "error"
 	}
 
 	if record.Workspace == "" {
@@ -1508,6 +1940,12 @@ func traceRecordFromIngestRequest(r *http.Request, cfg Config, input ingestTrace
 	}
 	if record.Environment == "" {
 		record.Environment = environmentFromRequest(r, cfg)
+	}
+	if record.TeamID == "" {
+		record.TeamID = strings.TrimSpace(r.Header.Get("X-Mcpscope-Team-Id"))
+	}
+	if record.TeamID == "" {
+		record.TeamID = "default"
 	}
 	if record.ServerName == "" {
 		record.ServerName = strings.TrimSpace(r.Header.Get("X-Mcpscope-Server-Name"))
@@ -1551,9 +1989,11 @@ func persistTraceRecord(ctx context.Context, cfg Config, record traceAPIRecord) 
 		TraceID:         record.TraceID,
 		Workspace:       record.Workspace,
 		Environment:     record.Environment,
+		TeamID:          record.TeamID,
 		ServerID:        record.ServerID,
 		ServerName:      record.ServerName,
 		Method:          record.Method,
+		Status:          traceStatusOrDefault(record.Status, record.IsError),
 		ParamsHash:      hashRawMessage(record.Params),
 		ParamsPayload:   rawMessageString(record.Params),
 		ResponseHash:    hashRawMessage(record.Response),
@@ -1689,13 +2129,13 @@ func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, 
 	switch strings.TrimSpace(query.Get("status")) {
 	case "":
 	case "error":
-		value := true
-		filter.IsError = &value
+		filter.Status = "error"
 	case "success":
-		value := false
-		filter.IsError = &value
+		filter.Status = "success"
+	case "blocked":
+		filter.Status = "blocked"
 	default:
-		return store.QueryFilter{}, 0, 0, fmt.Errorf("status must be empty, success, or error")
+		return store.QueryFilter{}, 0, 0, fmt.Errorf("status must be empty, success, error, or blocked")
 	}
 
 	return filter, limit, offset, nil
@@ -1728,9 +2168,11 @@ func traceRecordMatchesSearch(record traceAPIRecord, search string) bool {
 		record.TraceID,
 		record.Workspace,
 		record.Environment,
+		record.TeamID,
 		record.ServerID,
 		record.ServerName,
 		record.Method,
+		record.Status,
 		record.ErrorMessage,
 		string(record.Params),
 		string(record.Response),

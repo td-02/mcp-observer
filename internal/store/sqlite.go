@@ -41,15 +41,30 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 }
 
 func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
+	status := strings.TrimSpace(trace.Status)
+	if status == "" {
+		if trace.IsError {
+			status = "error"
+		} else {
+			status = "success"
+		}
+	}
+	teamID := strings.TrimSpace(trace.TeamID)
+	if teamID == "" {
+		teamID = "default"
+	}
+
 	const query = `
 		INSERT INTO traces (
 			id,
 			trace_id,
 			workspace,
 			environment,
+			team_id,
 			server_id,
 			server_name,
 			method,
+			status,
 			params_hash,
 			params_payload,
 			response_hash,
@@ -59,7 +74,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 			error_message,
 			sdk_reported,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.ExecContext(
@@ -69,9 +84,11 @@ func (s *SQLiteStore) Insert(ctx context.Context, trace Trace) error {
 		trace.TraceID,
 		trace.Workspace,
 		trace.Environment,
+		teamID,
 		trace.ServerID,
 		trace.ServerName,
 		trace.Method,
+		status,
 		trace.ParamsHash,
 		trace.ParamsPayload,
 		trace.ResponseHash,
@@ -101,9 +118,11 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 			trace_id,
 			workspace,
 			environment,
+			team_id,
 			server_id,
 			server_name,
 			method,
+			status,
 			params_hash,
 			params_payload,
 			response_hash,
@@ -531,6 +550,89 @@ func (s *SQLiteStore) QueryErrorStats(ctx context.Context, filter QueryFilter) (
 	return stats, nil
 }
 
+func (s *SQLiteStore) GetBudgetUsage(ctx context.Context, teamID, windowType string, windowStart time.Time) (BudgetUsage, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT team_id, window_type, window_start, call_count, token_count
+		FROM budgets
+		WHERE team_id = ? AND window_type = ? AND window_start = ?
+	`, teamID, windowType, sqliteTimestamp(windowStart))
+
+	var usage BudgetUsage
+	var windowStartRaw string
+	if err := row.Scan(&usage.TeamID, &usage.WindowType, &windowStartRaw, &usage.CallCount, &usage.TokenCount); err != nil {
+		if err == sql.ErrNoRows {
+			return BudgetUsage{
+				TeamID:      teamID,
+				WindowType:  windowType,
+				WindowStart: windowStart.UTC(),
+			}, nil
+		}
+		return BudgetUsage{}, fmt.Errorf("query budget usage: %w", err)
+	}
+	parsed, err := parseSQLiteTime(windowStartRaw)
+	if err != nil {
+		return BudgetUsage{}, fmt.Errorf("parse budget window_start: %w", err)
+	}
+	usage.WindowStart = parsed
+	return usage, nil
+}
+
+func (s *SQLiteStore) ListBudgetUsage(ctx context.Context) ([]BudgetUsage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT team_id, window_type, window_start, call_count, token_count
+		FROM budgets
+		ORDER BY team_id, window_start DESC, window_type
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query budget usage: %w", err)
+	}
+	defer rows.Close()
+
+	var usages []BudgetUsage
+	for rows.Next() {
+		var usage BudgetUsage
+		var windowStartRaw string
+		if err := rows.Scan(&usage.TeamID, &usage.WindowType, &windowStartRaw, &usage.CallCount, &usage.TokenCount); err != nil {
+			return nil, fmt.Errorf("scan budget usage: %w", err)
+		}
+		parsed, err := parseSQLiteTime(windowStartRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse budget window_start: %w", err)
+		}
+		usage.WindowStart = parsed
+		usages = append(usages, usage)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate budget usage: %w", err)
+	}
+	return usages, nil
+}
+
+func (s *SQLiteStore) IncrementBudgetUsage(ctx context.Context, usage BudgetUsage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO budgets (team_id, window_start, window_type, call_count, token_count)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(team_id, window_start, window_type) DO UPDATE SET
+			call_count = call_count + excluded.call_count,
+			token_count = token_count + excluded.token_count
+	`, usage.TeamID, sqliteTimestamp(usage.WindowStart), usage.WindowType, usage.CallCount, usage.TokenCount)
+	if err != nil {
+		return fmt.Errorf("increment budget usage: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ResetBudgetWindow(ctx context.Context, teamID, windowType string, windowStart time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM budgets
+		WHERE team_id = ? AND window_type = ? AND window_start = ?
+	`, teamID, windowType, sqliteTimestamp(windowStart))
+	if err != nil {
+		return fmt.Errorf("reset budget window: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...any) ([]Trace, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -548,9 +650,11 @@ func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...an
 			&trace.TraceID,
 			&trace.Workspace,
 			&trace.Environment,
+			&trace.TeamID,
 			&trace.ServerID,
 			&trace.ServerName,
 			&trace.Method,
+			&trace.Status,
 			&trace.ParamsHash,
 			&trace.ParamsPayload,
 			&trace.ResponseHash,
@@ -590,15 +694,17 @@ func traceQuery(filter QueryFilter) (string, []any) {
 	if search := strings.TrimSpace(filter.Search); search != "" {
 		conditions = append(conditions, `(
 			trace_id LIKE ? OR
+			team_id LIKE ? OR
 			server_id LIKE ? OR
 			server_name LIKE ? OR
 			method LIKE ? OR
+			status LIKE ? OR
 			error_message LIKE ? OR
 			params_payload LIKE ? OR
 			response_payload LIKE ?
 		)`)
 		pattern := "%" + search + "%"
-		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	if filter.Workspace != "" {
 		conditions = append(conditions, "workspace = ?")
@@ -620,6 +726,10 @@ func traceQuery(filter QueryFilter) (string, []any) {
 		conditions = append(conditions, "method = ?")
 		args = append(args, filter.Method)
 	}
+	if filter.Status != "" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, filter.Status)
+	}
 	if filter.IsError != nil {
 		conditions = append(conditions, "is_error = ?")
 		args = append(args, *filter.IsError)
@@ -639,9 +749,11 @@ func traceQuery(filter QueryFilter) (string, []any) {
 			trace_id,
 			workspace,
 			environment,
+			team_id,
 			server_id,
 			server_name,
 			method,
+			status,
 			params_hash,
 			params_payload,
 			response_hash,

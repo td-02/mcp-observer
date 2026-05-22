@@ -40,9 +40,17 @@ type FilterInput struct {
 }
 
 func RecordFromTrace(trace store.Trace) Record {
-	status := "ok"
-	if trace.IsError {
-		status = "error"
+	status := strings.ToLower(strings.TrimSpace(trace.Status))
+	switch status {
+	case "success", "":
+		status = "ok"
+	case "error", "blocked":
+	default:
+		if trace.IsError {
+			status = "error"
+		} else {
+			status = "ok"
+		}
 	}
 
 	return Record{
@@ -70,12 +78,11 @@ func BuildQueryFilter(input FilterInput, now time.Time) (store.QueryFilter, erro
 		return store.QueryFilter{}, err
 	}
 	switch status {
-	case "ok":
-		value := false
-		filter.IsError = &value
-	case "error":
-		value := true
-		filter.IsError = &value
+	case "all":
+	case "ok", "success":
+		filter.Status = "success"
+	case "error", "blocked":
+		filter.Status = status
 	}
 
 	if strings.TrimSpace(input.From) != "" {
@@ -127,7 +134,7 @@ func ParseStatusFilter(raw string) (string, error) {
 		return "all", nil
 	}
 	switch raw {
-	case "all", "ok", "error":
+	case "all", "ok", "success", "error", "blocked":
 		return raw, nil
 	default:
 		return "", fmt.Errorf("invalid status %q", raw)
@@ -260,9 +267,11 @@ func scanTrace(rows *sql.Rows) (store.Trace, error) {
 		&trace.TraceID,
 		&trace.Workspace,
 		&trace.Environment,
+		&trace.TeamID,
 		&trace.ServerID,
 		&trace.ServerName,
 		&trace.Method,
+		&trace.Status,
 		&trace.ParamsHash,
 		&trace.ParamsPayload,
 		&trace.ResponseHash,

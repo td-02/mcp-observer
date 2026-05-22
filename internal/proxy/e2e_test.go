@@ -372,6 +372,7 @@ func TestCaptureAndPersistBestEffortDoesNotAbortOnStoreFailure(t *testing.T) {
 	captureAndPersistBestEffort(
 		context.Background(),
 		cfg,
+		"",
 		"http",
 		"client_to_server",
 		time.Date(2026, 3, 31, 11, 0, 0, 0, time.UTC),
@@ -436,4 +437,20 @@ func (f failingTraceStore) QueryLatencyStats(context.Context, store.QueryFilter)
 
 func (f failingTraceStore) QueryErrorStats(context.Context, store.QueryFilter) ([]store.ErrorStat, error) {
 	return nil, nil
+}
+
+func (f failingTraceStore) GetBudgetUsage(context.Context, string, string, time.Time) (store.BudgetUsage, error) {
+	return store.BudgetUsage{}, nil
+}
+
+func (f failingTraceStore) ListBudgetUsage(context.Context) ([]store.BudgetUsage, error) {
+	return nil, nil
+}
+
+func (f failingTraceStore) IncrementBudgetUsage(context.Context, store.BudgetUsage) error {
+	return nil
+}
+
+func (f failingTraceStore) ResetBudgetWindow(context.Context, string, string, time.Time) error {
+	return nil
 }

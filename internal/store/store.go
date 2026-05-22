@@ -10,9 +10,11 @@ type Trace struct {
 	TraceID         string    `json:"trace_id"`
 	Workspace       string    `json:"workspace"`
 	Environment     string    `json:"environment"`
+	TeamID          string    `json:"team_id"`
 	ServerID        string    `json:"server_id"`
 	ServerName      string    `json:"server_name"`
 	Method          string    `json:"method"`
+	Status          string    `json:"status"`
 	ParamsHash      string    `json:"params_hash"`
 	ParamsPayload   string    `json:"params_payload"`
 	ResponseHash    string    `json:"response_hash"`
@@ -32,6 +34,7 @@ type QueryFilter struct {
 	ServerID      string
 	ServerName    string
 	Method        string
+	Status        string
 	IsError       *bool
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
@@ -103,6 +106,14 @@ type ErrorStat struct {
 	RecentErrorAt      *time.Time
 }
 
+type BudgetUsage struct {
+	TeamID      string    `json:"team_id"`
+	WindowType  string    `json:"window_type"`
+	WindowStart time.Time `json:"window_start"`
+	CallCount   int64     `json:"call_count"`
+	TokenCount  int64     `json:"token_count"`
+}
+
 type TraceStore interface {
 	Insert(ctx context.Context, trace Trace) error
 	Query(ctx context.Context, filter QueryFilter) ([]Trace, error)
@@ -117,4 +128,8 @@ type TraceStore interface {
 	LatestAlertEvent(ctx context.Context, workspace, environment, ruleID string) (*AlertEvent, error)
 	QueryLatencyStats(ctx context.Context, filter QueryFilter) ([]LatencyStat, error)
 	QueryErrorStats(ctx context.Context, filter QueryFilter) ([]ErrorStat, error)
+	GetBudgetUsage(ctx context.Context, teamID, windowType string, windowStart time.Time) (BudgetUsage, error)
+	ListBudgetUsage(ctx context.Context) ([]BudgetUsage, error)
+	IncrementBudgetUsage(ctx context.Context, usage BudgetUsage) error
+	ResetBudgetWindow(ctx context.Context, teamID, windowType string, windowStart time.Time) error
 }
