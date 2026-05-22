@@ -20,11 +20,14 @@ The storage layer is abstracted behind the `TraceStore` interface so the persist
 Stored trace records include:
 
 - server name and method
+- team ID for budget accounting
 - server ID for multi-server fan-out routing
 - params and response payloads
 - hashes for params and responses
 - latency and error state
 - creation timestamp
+
+Budget usage is tracked separately by team and window in the `budgets` table so the proxy can enforce hourly and daily limits before forwarding a request.
 
 ## Dashboard SSE flow
 

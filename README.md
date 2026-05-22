@@ -11,6 +11,7 @@ Open source MCP observability: proxy traffic, inspect traces, replay calls, diff
 - Serves a local dashboard for traces, latency, errors, and alerts, including trace search, time-range filtering, and alert rule editing
 - Stores traces in SQLite with retention controls
 - Supports workspace and environment scoping
+- Enforces per-team budgets from a YAML config file
 - Accepts SDK-reported traces through `POST /api/ingest`
 - Ships thin SDKs for direct embedding in Go and TypeScript servers
 - Evaluates built-in alert rules and delivers to webhook, Slack, or PagerDuty
@@ -62,6 +63,7 @@ mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080
 For source builds, `make build` and `make test` regenerate the dashboard assets before compiling the Go binary.
 
 The dashboard trace view supports text search plus `created_after` and `created_before` filtering, and the Alerts tab lets you edit, enable, disable, or delete rules in place.
+The Budgets tab shows live usage by team and window.
 
 SDKs for direct embedding:
 
@@ -103,6 +105,12 @@ mcpscope snapshot --server ./your-mcp-server --output baseline.json
 mcpscope diff baseline.json current.json --exit-code
 ```
 
+Reset a budget window during an incident:
+
+```bash
+mcpscope budget reset --team team-alpha --window hour
+```
+
 ## Config
 
 Example config: [`mcpscope.example.json`](mcpscope.example.json)
@@ -120,6 +128,7 @@ Key fields:
 - `proxy.transport`: `stdio` or `http`
 - `proxy.retainFor`: trace retention duration
 - `proxy.maxTraces`: trace cap
+- `--budgets-config`: YAML file with per-team call and token limits
 
 CLI flags override config values.
 
@@ -135,6 +144,7 @@ Verified in this repo with:
 ## Notes
 
 - The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist), which is checked in and embedded at build time.
+- `budgets-config` is separate from the main config file so you can rotate budget policy without changing proxy runtime settings.
 - Rebuilding the Vite dashboard bundle currently needs Node `20.19+` or `22.12+`.
 - The HTTP server exposes `/healthz` for liveness and `/readyz` for readiness.
 - CI includes a smoke workflow that builds the packaged binary, starts a mock upstream, and exercises the dashboard and trace APIs end to end.

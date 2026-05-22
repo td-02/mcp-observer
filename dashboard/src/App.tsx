@@ -12,9 +12,9 @@ import './App.css'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
-type TabKey = 'traces' | 'latency' | 'errors' | 'alerts'
+type TabKey = 'traces' | 'latency' | 'errors' | 'alerts' | 'budgets'
 type WindowKey = '5m' | '30m' | '1h'
-type StatusFilter = '' | 'success' | 'error'
+type StatusFilter = '' | 'success' | 'error' | 'blocked'
 type AlertRuleType = 'error_rate' | 'latency_p95'
 
 type TraceRecord = {
@@ -22,9 +22,11 @@ type TraceRecord = {
   trace_id: string
   workspace: string
   environment: string
+  team_id: string
   server_id: string
   server_name: string
   method: string
+  status: string
   params?: unknown
   response?: unknown
   latency_ms: number
@@ -135,6 +137,25 @@ type ConfiguredAlertRule = {
   last_fired_at?: string
 }
 
+type BudgetRecord = {
+  team_id: string
+  header: string
+  window_type: 'hour' | 'day' | string
+  window_start: string
+  usage: {
+    team_id: string
+    window_type: string
+    window_start: string
+    call_count: number
+    token_count: number
+  }
+  limits: {
+    calls_per_hour: number
+    calls_per_day: number
+    tokens_per_day: number
+  }
+}
+
 const windows: { value: WindowKey; label: string }[] = [
   { value: '5m', label: 'Last 5m' },
   { value: '30m', label: 'Last 30m' },
@@ -146,6 +167,7 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: 'latency', label: 'Latency' },
   { key: 'errors', label: 'Errors' },
   { key: 'alerts', label: 'Alerts' },
+  { key: 'budgets', label: 'Budgets' },
 ]
 
 function App() {
@@ -169,6 +191,7 @@ function App() {
   const [latencyStats, setLatencyStats] = useState<LatencyStatRecord[]>([])
   const [errorStats, setErrorStats] = useState<ErrorStatRecord[]>([])
   const [configuredAlertRules, setConfiguredAlertRules] = useState<ConfiguredAlertRule[]>([])
+  const [budgetRecords, setBudgetRecords] = useState<BudgetRecord[]>([])
   const [alertRules, setAlertRules] = useState<AlertRule[]>([])
   const [alertEvaluations, setAlertEvaluations] = useState<AlertEvaluation[]>([])
   const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([])
@@ -292,7 +315,15 @@ function App() {
     let active = true
 
     const loadPanels = async () => {
-      const [latencyResponse, errorResponse, configuredRuleResponse, ruleResponse, evaluationResponse, eventResponse] =
+      const [
+        latencyResponse,
+        errorResponse,
+        configuredRuleResponse,
+        budgetResponse,
+        ruleResponse,
+        evaluationResponse,
+        eventResponse,
+      ] =
         await Promise.all([
           apiFetch(
             apiURL('/api/stats/latency', authToken, {
@@ -315,19 +346,29 @@ function App() {
             authToken,
           ),
           apiFetch(apiURL('/api/alert-rules', authToken, { workspace, environment }), authToken),
+          apiFetch(apiURL('/api/budgets', authToken, {}), authToken),
           apiFetch(apiURL('/api/alerts/rules', authToken, { workspace, environment }), authToken),
           apiFetch(apiURL('/api/alerts/evaluations', authToken, { workspace, environment }), authToken),
           apiFetch(apiURL('/api/alerts/events', authToken, { workspace, environment }), authToken),
         ])
 
-      const [latencyData, errorData, configuredRules, rules, evaluations, events] = (await Promise.all([
+      const [latencyData, errorData, configuredRules, budgets, rules, evaluations, events] = (await Promise.all([
         latencyResponse.json(),
         errorResponse.json(),
         configuredRuleResponse.json(),
+        budgetResponse.json(),
         ruleResponse.json(),
         evaluationResponse.json(),
         eventResponse.json(),
-      ])) as [LatencyStatRecord[], ErrorStatRecord[], ConfiguredAlertRule[], AlertRule[], AlertEvaluation[], AlertEvent[]]
+      ])) as [
+        LatencyStatRecord[],
+        ErrorStatRecord[],
+        ConfiguredAlertRule[],
+        BudgetRecord[],
+        AlertRule[],
+        AlertEvaluation[],
+        AlertEvent[],
+      ]
 
       if (!active) {
         return
@@ -337,6 +378,7 @@ function App() {
       setLatencyStats(latencyData)
       setErrorStats(errorData)
       setConfiguredAlertRules(configuredRules)
+      setBudgetRecords(budgets)
       setAlertRules(rules)
       setAlertEvaluations(evaluations)
       setAlertEvents(events)
@@ -350,6 +392,7 @@ function App() {
       setLatencyStats([])
       setErrorStats([])
       setConfiguredAlertRules([])
+      setBudgetRecords([])
       setAlertRules([])
       setAlertEvaluations([])
       setAlertEvents([])
@@ -670,6 +713,7 @@ function App() {
               <option value="">All statuses</option>
               <option value="success">Success</option>
               <option value="error">Error</option>
+              <option value="blocked">Blocked</option>
             </select>
           </label>
 
@@ -806,14 +850,14 @@ function App() {
                               <div className="muted mono">{trace.server_id}</div>
                             ) : null}
                           </td>
-                          <td>{trace.method || '(response)'}</td>
-                          <td>{trace.latency_ms} ms</td>
-                          <td>
-                            <span className={trace.is_error ? 'pill error' : 'pill success'}>
-                              {trace.is_error ? 'error' : 'success'}
+                      <td>{trace.method || '(response)'}</td>
+                      <td>{trace.latency_ms} ms</td>
+                      <td>
+                            <span className={traceStatusClass(trace.status || (trace.is_error ? 'error' : 'success'))}>
+                              {trace.status || (trace.is_error ? 'error' : 'success')}
                             </span>
-                          </td>
-                        </tr>
+                      </td>
+                    </tr>
                         {expanded ? (
                           <tr className="detail-row">
                             <td colSpan={8}>
@@ -936,6 +980,61 @@ function App() {
               ))}
             </div>
           )}
+        </section>
+      ) : null}
+
+      {activeTab === 'budgets' ? (
+        <section className="panel-card">
+          <div className="panel-header">
+            <div>
+              <h2>Budget usage</h2>
+              <p>Current call and token usage tracked per team and window.</p>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                  <th>Header</th>
+                  <th>Window</th>
+                  <th>Calls</th>
+                  <th>Tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {budgetRecords.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="empty">
+                      No budget rows yet. Add a budgets config and route traffic through the proxy.
+                    </td>
+                  </tr>
+                ) : (
+                  budgetRecords.map((record) => (
+                    <tr key={`${record.team_id}:${record.window_type}:${record.window_start}`}>
+                      <td>{record.team_id}</td>
+                      <td>{record.header || 'default'}</td>
+                      <td>
+                        {record.window_type} · {formatTimestamp(record.window_start)}
+                      </td>
+                      <td>
+                        <div className="budget-metric">
+                          <strong>{record.usage.call_count}</strong>
+                          <span>/ {budgetLimitForWindow(record, 'calls')}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="budget-metric">
+                          <strong>{record.usage.token_count}</strong>
+                          <span>/ {budgetLimitForWindow(record, 'tokens')}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
       ) : null}
 
@@ -1306,6 +1405,30 @@ function formatPayload(payload: unknown) {
   }
 
   return JSON.stringify(payload, null, 2)
+}
+
+function traceStatusClass(status: string) {
+  if (status === 'blocked') {
+    return 'pill warning'
+  }
+  if (status === 'error') {
+    return 'pill error'
+  }
+  return 'pill success'
+}
+
+function budgetLimitForWindow(record: BudgetRecord, kind: 'calls' | 'tokens') {
+  if (kind === 'calls') {
+    if (record.window_type === 'hour') {
+      return record.limits.calls_per_hour > 0 ? String(record.limits.calls_per_hour) : 'unlimited'
+    }
+    return record.limits.calls_per_day > 0 ? String(record.limits.calls_per_day) : 'unlimited'
+  }
+
+  if (record.window_type === 'day' && record.limits.tokens_per_day > 0) {
+    return String(record.limits.tokens_per_day)
+  }
+  return 'n/a'
 }
 
 function statusPillClass(status: AlertEvaluation['status']) {

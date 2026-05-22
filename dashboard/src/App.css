@@ -420,9 +420,29 @@ pre {
   color: #a33f1f;
 }
 
+.pill.warning {
+  background: rgba(181, 114, 18, 0.14);
+  color: #9a5c00;
+}
+
 .pill.neutral {
   background: rgba(90, 83, 74, 0.12);
   color: #6f6257;
+}
+
+.budget-metric {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.budget-metric strong {
+  font-size: 1rem;
+  color: #231d18;
+}
+
+.budget-metric span {
+  color: #7d6f63;
+  font-size: 0.8rem;
 }
 
 .error-text {
