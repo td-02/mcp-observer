@@ -100,7 +100,8 @@ func newProxyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			budgetsConfig, err := budget.LoadConfig(budgetsConfigPath)
+			budgetConfigSource := resolveBudgetConfigPath(budgetsConfigPath, alertsConfigPath)
+			budgetsConfig, err := budget.LoadConfig(budgetConfigSource)
 			if err != nil {
 				return err
 			}
@@ -375,6 +376,13 @@ func defaultInt(value, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func resolveBudgetConfigPath(budgetsConfigPath, alertsConfigPath string) string {
+	if strings.TrimSpace(budgetsConfigPath) != "" {
+		return budgetsConfigPath
+	}
+	return alertsConfigPath
 }
 
 type multiServerOptions struct {

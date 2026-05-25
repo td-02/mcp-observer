@@ -221,3 +221,43 @@ func TestAllocateWorkerPortsRejectsDashboardConflict(t *testing.T) {
 		t.Fatalf("expected conflict error")
 	}
 }
+
+func TestResolveBudgetConfigPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		budgets   string
+		alerts    string
+		wantValue string
+	}{
+		{
+			name:      "prefer explicit budgets config",
+			budgets:   "budgets.yaml",
+			alerts:    "alerts.yaml",
+			wantValue: "budgets.yaml",
+		},
+		{
+			name:      "fallback to alerts config",
+			budgets:   "",
+			alerts:    "alerts.yaml",
+			wantValue: "alerts.yaml",
+		},
+		{
+			name:      "empty when neither provided",
+			budgets:   "",
+			alerts:    "",
+			wantValue: "",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveBudgetConfigPath(tc.budgets, tc.alerts); got != tc.wantValue {
+				t.Fatalf("resolveBudgetConfigPath(%q, %q) = %q, want %q", tc.budgets, tc.alerts, got, tc.wantValue)
+			}
+		})
+	}
+}
