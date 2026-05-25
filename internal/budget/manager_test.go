@@ -73,6 +73,46 @@ func TestManagerBlocksAndIncrementsUsage(t *testing.T) {
 	}
 }
 
+func TestManagerUnknownTeamFallsBackToDefaultWithoutLimits(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Budgets: []TeamBudget{
+			{
+				Team:   "team-alpha",
+				Header: "X-Team-ID",
+				Limits: BudgetLimits{
+					CallsPerHour: 1,
+				},
+			},
+		},
+	}
+	st := newMemoryBudgetStore()
+	manager := NewManager(cfg, st)
+	now := time.Date(2026, 5, 21, 10, 15, 0, 0, time.UTC)
+
+	for i := 0; i < 3; i++ {
+		decision, err := manager.CheckAndReserve(context.Background(), "team-unknown", now.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatalf("CheckAndReserve returned error: %v", err)
+		}
+		if !decision.Allowed {
+			t.Fatalf("expected unknown team request to be allowed: %+v", decision)
+		}
+		if decision.TeamID != "default" {
+			t.Fatalf("team = %q, want default", decision.TeamID)
+		}
+	}
+
+	dayUsage, err := st.GetBudgetUsage(context.Background(), "default", string(WindowDay), WindowStart(now, WindowDay))
+	if err != nil {
+		t.Fatalf("GetBudgetUsage returned error: %v", err)
+	}
+	if dayUsage.CallCount != 3 {
+		t.Fatalf("default day call_count = %d, want 3", dayUsage.CallCount)
+	}
+}
+
 type memoryBudgetStore struct {
 	mu   sync.Mutex
 	rows map[string]store.BudgetUsage
