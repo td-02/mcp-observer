@@ -165,6 +165,18 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
+// Flush checkpoint-writes WAL pages so buffered trace writes are persisted before shutdown.
+func (s *SQLiteStore) Flush(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	if err != nil {
+		return fmt.Errorf("flush sqlite wal checkpoint: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM traces WHERE created_at < ?`, sqliteTimestamp(cutoff))
 	if err != nil {

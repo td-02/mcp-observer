@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,6 +48,9 @@ func newProxyCmd() *cobra.Command {
 	var slackWebhooks []string
 	var pagerDutyKeys []string
 	var budgetsConfigPath string
+	var shutdownTimeout string
+	var storeType string
+	var dsn string
 
 	cmd := &cobra.Command{
 		Use:   "proxy [command...]",
@@ -58,6 +62,8 @@ func newProxyCmd() *cobra.Command {
 			}
 
 			dbPath = effectiveString(cmd, "db", dbPath, loadedConfig.Proxy.DB)
+			storeType = effectiveString(cmd, "store", storeType, loadedConfig.Proxy.Store)
+			dsn = effectiveString(cmd, "dsn", dsn, loadedConfig.Proxy.DSN)
 			if !cmd.Flags().Changed("port") && loadedConfig.Proxy.Port > 0 {
 				port = loadedConfig.Proxy.Port
 			}
@@ -71,6 +77,7 @@ func newProxyCmd() *cobra.Command {
 			environment = effectiveString(cmd, "environment", environment, loadedConfig.Environment)
 			authToken = effectiveString(cmd, "auth-token", authToken, loadedConfig.AuthToken)
 			retainFor = effectiveString(cmd, "retain-for", retainFor, loadedConfig.Proxy.RetainFor)
+			shutdownTimeout = effectiveString(cmd, "shutdown-timeout", shutdownTimeout, loadedConfig.Proxy.Shutdown)
 			if !cmd.Flags().Changed("max-traces") && loadedConfig.Proxy.MaxTraces > 0 {
 				maxTraces = loadedConfig.Proxy.MaxTraces
 			}
@@ -95,6 +102,9 @@ func newProxyCmd() *cobra.Command {
 			if err := validatePort(basePort); err != nil {
 				return err
 			}
+			if err := validateStoreConfig(storeType, dsn); err != nil {
+				return err
+			}
 
 			alertsConfig, err := alerting.LoadConfig(alertsConfigPath)
 			if err != nil {
@@ -110,12 +120,17 @@ func newProxyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			shutdownDuration, err := parseShutdownTimeout(shutdownTimeout)
+			if err != nil {
+				return err
+			}
 
 			traceStore, err := store.OpenSQLite(cmd.Context(), dbPath)
 			if err != nil {
 				return err
 			}
 			defer traceStore.Close()
+			defer flushStore(cmd.Context(), traceStore)
 
 			telemetryClient, err := telemetry.New(cmd.Context(), enableOTEL)
 			if err != nil {
@@ -157,6 +172,8 @@ func newProxyCmd() *cobra.Command {
 					NotifyRetries:   defaultInt(loadedConfig.Notification.RetryMaxAttempts, 3),
 					NotifyBackoff:   time.Duration(defaultInt(loadedConfig.Notification.RetryBackoffSeconds, 2)) * time.Second,
 					Dashboard:       dashboardFS,
+					ShutdownTimeout: shutdownDuration,
+					Logger:          slog.Default(),
 					Stdin:           os.Stdin,
 					Stdout:          os.Stdout,
 					Stderr:          os.Stderr,
@@ -190,6 +207,8 @@ func newProxyCmd() *cobra.Command {
 				NotifyRetries:   defaultInt(loadedConfig.Notification.RetryMaxAttempts, 3),
 				NotifyBackoff:   time.Duration(defaultInt(loadedConfig.Notification.RetryBackoffSeconds, 2)) * time.Second,
 				Dashboard:       dashboardFS,
+				ShutdownTimeout: shutdownDuration,
+				Logger:          slog.Default(),
 				Stderr:          os.Stderr,
 			})
 		},
@@ -201,6 +220,8 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().IntVar(&basePort, "base-port", 4444, "Base port for worker proxies. Worker ports start at base-port+1")
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "Proxy transport: stdio or http")
 	cmd.Flags().StringVar(&dbPath, "db", "mcpscope.db", "SQLite database path for persisted traces")
+	cmd.Flags().StringVar(&storeType, "store", "sqlite", "Trace store backend: sqlite or postgres")
+	cmd.Flags().StringVar(&dsn, "dsn", "", "Postgres DSN when --store=postgres")
 	cmd.Flags().BoolVar(&enableOTEL, "otel", false, "Enable OpenTelemetry export for intercepted MCP tool calls")
 	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a duration. Use 0 to disable age-based retention")
 	cmd.Flags().IntVar(&maxTraces, "max-traces", 5000, "Maximum number of traces to retain. Use 0 to disable count-based retention")
@@ -210,6 +231,7 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token required for dashboard APIs when set")
 	cmd.Flags().StringVar(&alertsConfigPath, "alerts-config", "", "Path to a YAML file describing external alert rules")
 	cmd.Flags().StringVar(&budgetsConfigPath, "budgets-config", "", "Path to a YAML file describing per-team budgets")
+	cmd.Flags().StringVar(&shutdownTimeout, "shutdown-timeout", "30s", "Graceful shutdown timeout (e.g. 30s)")
 	cmd.Flags().StringVar(&publicURL, "public-url", "", "Public dashboard URL used in alert notifications")
 	cmd.Flags().StringSliceVar(&notifyWebhooks, "notify-webhook", nil, "Webhook URL that receives alert state changes. Repeatable")
 	cmd.Flags().StringSliceVar(&slackWebhooks, "notify-slack-webhook", nil, "Slack webhook URL that receives alert state changes. Repeatable")
@@ -311,6 +333,48 @@ func parseRetentionDuration(raw string) (time.Duration, error) {
 	return duration, nil
 }
 
+func parseShutdownTimeout(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 30 * time.Second, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("--shutdown-timeout must be a valid duration")
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("--shutdown-timeout must be greater than 0")
+	}
+	return duration, nil
+}
+
+func validateStoreConfig(storeType, dsn string) error {
+	switch strings.ToLower(strings.TrimSpace(storeType)) {
+	case "", "sqlite":
+		return nil
+	case "postgres":
+		if strings.TrimSpace(dsn) == "" {
+			return fmt.Errorf("--dsn is required when --store=postgres")
+		}
+		return fmt.Errorf("postgres store is not available in this build")
+	default:
+		return fmt.Errorf("--store must be sqlite or postgres")
+	}
+}
+
+func flushStore(ctx context.Context, traceStore store.TraceStore) {
+	type flusher interface {
+		Flush(context.Context) error
+	}
+	flushable, ok := traceStore.(flusher)
+	if !ok {
+		return
+	}
+	if err := flushable.Flush(ctx); err != nil {
+		slog.Warn("trace store flush failed", "error", err)
+	}
+}
+
 func normalizeKeys(values []string) []string {
 	keys := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
@@ -407,6 +471,8 @@ type multiServerOptions struct {
 	Dashboard       fs.FS
 	Telemetry       *telemetry.Client
 	Stderr          io.Writer
+	ShutdownTimeout time.Duration
+	Logger          *slog.Logger
 }
 
 type workerDeployment struct {
@@ -470,6 +536,8 @@ func runMultiServerProxy(ctx context.Context, opts multiServerOptions) error {
 		Dashboard:       opts.Dashboard,
 		Stderr:          opts.Stderr,
 		Runtime:         runtime,
+		ShutdownTimeout: opts.ShutdownTimeout,
+		Logger:          opts.Logger,
 	}
 
 	router, err := buildProxyRouter(deployments)
@@ -517,6 +585,8 @@ func runMultiServerProxy(ctx context.Context, opts multiServerOptions) error {
 				Stderr:          opts.Stderr,
 				Runtime:         runtime,
 				ServerID:        deployment.serverID,
+				ShutdownTimeout: opts.ShutdownTimeout,
+				Logger:          opts.Logger,
 			}
 			errCh <- proxy.Run(ctx, workerCfg)
 		}()

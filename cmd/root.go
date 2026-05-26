@@ -1,8 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,15 +19,27 @@ var rootCmd = &cobra.Command{
 	Short:         "MCP utility CLI",
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		initLogger(logLevel)
+		cfg, err := appconfig.Load(configPath)
+		if err != nil {
+			return err
+		}
+		loadedConfig = cfg
+		return nil
+	},
 }
 
 var dashboardFS fs.FS
 var buildVersion = "dev"
 var configPath string
+var logLevel string
+var buildInfo = ""
 var loadedConfig appconfig.Config
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "Path to a mcpscope JSON config file")
+	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "Path to a mcpscope YAML config file")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug|info|warn|error")
 }
 
 type exitCodeError struct {
@@ -57,6 +74,14 @@ func SetVersion(version string) {
 	buildVersion = version
 }
 
+func SetBuildInfo(info string) {
+	buildInfo = strings.TrimSpace(info)
+}
+
+func VersionString() string {
+	return versionString()
+}
+
 func AsExitCoder(err error) (interface{ ExitCode() int }, bool) {
 	var exitErr interface{ ExitCode() int }
 	if errors.As(err, &exitErr) {
@@ -66,11 +91,32 @@ func AsExitCoder(err error) (interface{ ExitCode() int }, bool) {
 }
 
 func Execute() error {
-	cfg, err := appconfig.Load(configPath)
-	if err != nil {
-		return err
-	}
-	loadedConfig = cfg
+	return ExecuteContext(context.Background())
+}
 
-	return rootCmd.Execute()
+func ExecuteContext(ctx context.Context) error {
+	return rootCmd.ExecuteContext(ctx)
+}
+
+func initLogger(levelRaw string) {
+	var level slog.Level
+	switch strings.ToLower(strings.TrimSpace(levelRaw)) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+}
+
+func versionString() string {
+	if buildInfo != "" {
+		return fmt.Sprintf("mcpscope %s (%s)", buildVersion, buildInfo)
+	}
+	return fmt.Sprintf("mcpscope %s", buildVersion)
 }

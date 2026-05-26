@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mcpscope/internal/alerting"
@@ -59,6 +61,8 @@ type Config struct {
 	NotifyRetries   int
 	NotifyBackoff   time.Duration
 	Dashboard       fs.FS
+	ShutdownTimeout time.Duration
+	Logger          *slog.Logger
 	eventHub        *traceEventHub
 	tracker         *traceTracker
 	redactor        *payloadRedactor
@@ -70,12 +74,14 @@ type Config struct {
 type Runtime struct {
 	eventHub *traceEventHub
 	redactor *payloadRedactor
+	metrics  *proxyMetrics
 }
 
 func NewRuntime(redactKeys []string) *Runtime {
 	return &Runtime{
 		eventHub: newTraceEventHub(),
 		redactor: newPayloadRedactor(redactKeys),
+		metrics:  newProxyMetrics(),
 	}
 }
 
@@ -98,6 +104,59 @@ func prepareConfig(cfg *Config) {
 	if strings.TrimSpace(cfg.Version) == "" {
 		cfg.Version = "dev"
 	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = 30 * time.Second
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+}
+
+type metricKey struct {
+	Method   string
+	Status   string
+	ServerID string
+}
+
+type durationMetricKey struct {
+	Method   string
+	ServerID string
+}
+
+type proxyMetrics struct {
+	activeConnections atomic.Int64
+	mu                sync.Mutex
+	traceCounters     map[metricKey]int64
+	durationBuckets   map[durationMetricKey][10]int64
+}
+
+func newProxyMetrics() *proxyMetrics {
+	return &proxyMetrics{
+		traceCounters:   make(map[metricKey]int64),
+		durationBuckets: make(map[durationMetricKey][10]int64),
+	}
+}
+
+var histogramBuckets = [10]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
+
+func (m *proxyMetrics) ObserveTrace(record traceAPIRecord) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := metricKey{Method: record.Method, Status: record.Status, ServerID: record.ServerID}
+	m.traceCounters[k]++
+
+	seconds := float64(record.LatencyMs) / 1000.0
+	dk := durationMetricKey{Method: record.Method, ServerID: record.ServerID}
+	b := m.durationBuckets[dk]
+	for i, bound := range histogramBuckets {
+		if seconds <= bound {
+			b[i]++
+		}
+	}
+	m.durationBuckets[dk] = b
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -334,7 +393,7 @@ func runStdio(ctx context.Context, cfg Config) error {
 	}
 
 	if len(cfg.ServerCommand) == 0 {
-		shutdownHTTPServer(server)
+		shutdownHTTPServer(server, cfg.ShutdownTimeout)
 		return errors.New("missing stdio server command")
 	}
 
@@ -353,7 +412,7 @@ func runStdio(ctx context.Context, cfg Config) error {
 	}
 
 	if err := cmd.Start(); err != nil {
-		shutdownHTTPServer(server)
+		shutdownHTTPServer(server, cfg.ShutdownTimeout)
 		return fmt.Errorf("start subprocess: %w", err)
 	}
 
@@ -376,7 +435,7 @@ func runStdio(ctx context.Context, cfg Config) error {
 	}
 
 	waitErr := cmd.Wait()
-	shutdownHTTPServer(server)
+	shutdownHTTPServer(server, cfg.ShutdownTimeout)
 	if err := <-serverErr; err != nil {
 		return err
 	}
@@ -623,7 +682,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 		}
 		return nil
 	case err := <-waitErr:
-		shutdownHTTPServer(server)
+		shutdownHTTPServer(server, cfg.ShutdownTimeout)
 		if err != nil {
 			return fmt.Errorf("subprocess exited with error: %w", err)
 		}
@@ -678,10 +737,13 @@ func captureAndPersistBestEffort(ctx context.Context, cfg Config, teamID, transp
 }
 
 func logProxyWarning(stderr io.Writer, message string, err error) {
-	if stderr == nil || err == nil {
+	if err == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(stderr, "mcpscope: %s: %v\n", message, err)
+	slog.Warn(message, "error", err)
+	if stderr != nil {
+		_, _ = fmt.Fprintf(stderr, "mcpscope: %s: %v\n", message, err)
+	}
 }
 
 func stderrWriter(cfg Config) io.Writer {
@@ -937,7 +999,7 @@ func StartHTTPServer(ctx context.Context, cfg Config, proxyPostHandler http.Hand
 	serverErr := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		shutdownHTTPServer(server)
+		shutdownHTTPServer(server, cfg.ShutdownTimeout)
 	}()
 
 	go func() {
@@ -952,11 +1014,14 @@ func StartHTTPServer(ctx context.Context, cfg Config, proxyPostHandler http.Hand
 	return server, serverErr, nil
 }
 
-func shutdownHTTPServer(server *http.Server) {
+func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
 	if server == nil {
 		return
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)
 }
@@ -1000,6 +1065,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleErrorStats(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/events":
 			handleEvents(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/metrics":
+			handleMetrics(w, cfg)
 		case r.Method == http.MethodPost && proxyPostHandler != nil:
 			proxyPostHandler(w, r)
 		case r.Method == http.MethodGet || r.Method == http.MethodHead:
@@ -1009,7 +1076,9 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 		}
 	})
 
-	return requireAuth(cfg, handler)
+	withAuth := requireAuth(cfg, handler)
+	withRateLimit := rateLimitAPI(withAuth)
+	return applyHTTPMiddleware(cfg, withRateLimit)
 }
 
 func handleHealthz(w http.ResponseWriter, cfg Config) {
@@ -1979,6 +2048,9 @@ func persistTraceRecord(ctx context.Context, cfg Config, record traceAPIRecord) 
 	if cfg.eventHub != nil {
 		cfg.eventHub.Publish(record)
 	}
+	if cfg.Runtime != nil && cfg.Runtime.metrics != nil {
+		cfg.Runtime.metrics.ObserveTrace(record)
+	}
 
 	if cfg.Store == nil {
 		return nil
@@ -2205,6 +2277,115 @@ func workspaceFromRequest(r *http.Request, cfg Config) string {
 		return "default"
 	}
 	return workspace
+}
+
+func applyHTTPMiddleware(cfg Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		if cfg.Runtime != nil && cfg.Runtime.metrics != nil {
+			cfg.Runtime.metrics.activeConnections.Add(1)
+			defer cfg.Runtime.metrics.activeConnections.Add(-1)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type tokenBucket struct {
+	tokens     float64
+	lastRefill time.Time
+}
+
+var (
+	rateLimiterMu sync.Mutex
+	rateLimiters  = map[string]*tokenBucket{}
+)
+
+func rateLimitAPI(next http.Handler) http.Handler {
+	const (
+		capacity   = 120.0
+		refillRate = 2.0
+	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		now := time.Now()
+		ip := clientIP(r)
+		rateLimiterMu.Lock()
+		b, ok := rateLimiters[ip]
+		if !ok {
+			b = &tokenBucket{tokens: capacity, lastRefill: now}
+			rateLimiters[ip] = b
+		}
+		elapsed := now.Sub(b.lastRefill).Seconds()
+		b.tokens = math.Min(capacity, b.tokens+(elapsed*refillRate))
+		b.lastRefill = now
+		if b.tokens < 1 {
+			rateLimiterMu.Unlock()
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		b.tokens--
+		rateLimiterMu.Unlock()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func clientIP(r *http.Request) string {
+	host := strings.TrimSpace(r.RemoteAddr)
+	if host == "" {
+		return "unknown"
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil && parsedHost != "" {
+		return parsedHost
+	}
+	return host
+}
+
+func handleMetrics(w http.ResponseWriter, cfg Config) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	if cfg.Runtime == nil || cfg.Runtime.metrics == nil {
+		_, _ = w.Write([]byte("mcpscope_active_connections 0\n"))
+		return
+	}
+	metrics := cfg.Runtime.metrics
+	var builder strings.Builder
+	builder.WriteString("# HELP mcpscope_traces_total Total traces captured by method/status/server.\n")
+	builder.WriteString("# TYPE mcpscope_traces_total counter\n")
+	builder.WriteString("# HELP mcpscope_proxy_duration_seconds Proxy call duration histogram.\n")
+	builder.WriteString("# TYPE mcpscope_proxy_duration_seconds histogram\n")
+	builder.WriteString("# HELP mcpscope_active_connections Current active HTTP connections.\n")
+	builder.WriteString("# TYPE mcpscope_active_connections gauge\n")
+
+	metrics.mu.Lock()
+	for k, v := range metrics.traceCounters {
+		builder.WriteString(fmt.Sprintf("mcpscope_traces_total{method=%q,status=%q,server_id=%q} %d\n", sanitizeMetricLabel(k.Method), sanitizeMetricLabel(k.Status), sanitizeMetricLabel(k.ServerID), v))
+	}
+	for k, buckets := range metrics.durationBuckets {
+		var count int64
+		for i, upper := range histogramBuckets {
+			count += buckets[i]
+			builder.WriteString(fmt.Sprintf("mcpscope_proxy_duration_seconds_bucket{method=%q,server_id=%q,le=%q} %d\n", sanitizeMetricLabel(k.Method), sanitizeMetricLabel(k.ServerID), strconv.FormatFloat(upper, 'f', -1, 64), count))
+		}
+		builder.WriteString(fmt.Sprintf("mcpscope_proxy_duration_seconds_bucket{method=%q,server_id=%q,le=\"+Inf\"} %d\n", sanitizeMetricLabel(k.Method), sanitizeMetricLabel(k.ServerID), count))
+		builder.WriteString(fmt.Sprintf("mcpscope_proxy_duration_seconds_count{method=%q,server_id=%q} %d\n", sanitizeMetricLabel(k.Method), sanitizeMetricLabel(k.ServerID), count))
+	}
+	metrics.mu.Unlock()
+	builder.WriteString(fmt.Sprintf("mcpscope_active_connections %d\n", metrics.activeConnections.Load()))
+	_, _ = w.Write([]byte(builder.String()))
+}
+
+func sanitizeMetricLabel(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	return strings.ReplaceAll(v, "\"", "\\\"")
 }
 
 func requireAuth(cfg Config, next http.Handler) http.Handler {
