@@ -1,7 +1,7 @@
 class Mcpscope < Formula
   desc "Transparent MCP proxy with tracing, schema snapshots, and a live dashboard"
-  homepage "https://github.com/td-02/mcpscope"
-  url "https://github.com/td-02/mcpscope/releases/download/v0.1.0/mcpscope_REPLACE_ME.tar.gz"
+  homepage "https://github.com/td-02/mcp-observer"
+  url "https://github.com/td-02/mcp-observer/releases/download/v1.0.0/mcpscope_v1.0.0_darwin_amd64.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_ARCHIVE_SHA256"
   license "MIT"
 

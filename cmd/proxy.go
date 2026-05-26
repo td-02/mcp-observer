@@ -223,7 +223,7 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&storeType, "store", "sqlite", "Trace store backend: sqlite or postgres")
 	cmd.Flags().StringVar(&dsn, "dsn", "", "Postgres DSN when --store=postgres")
 	cmd.Flags().BoolVar(&enableOTEL, "otel", false, "Enable OpenTelemetry export for intercepted MCP tool calls")
-	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a duration. Use 0 to disable age-based retention")
+	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a positive duration")
 	cmd.Flags().IntVar(&maxTraces, "max-traces", 5000, "Maximum number of traces to retain. Use 0 to disable count-based retention")
 	cmd.Flags().StringSliceVar(&redactKeys, "redact-key", []string{"apiKey", "api_key", "authorization", "token", "secret", "password"}, "JSON field names to redact before persistence and logging")
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "Logical workspace name for multi-project separation")
@@ -329,6 +329,9 @@ func parseRetentionDuration(raw string) (time.Duration, error) {
 	duration, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, fmt.Errorf("--retain-for must be a valid duration")
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("--retain-for must be greater than 0")
 	}
 	return duration, nil
 }

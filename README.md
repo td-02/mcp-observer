@@ -38,15 +38,14 @@ flowchart LR
 ## Quick start
 
 ```bash
-# Download the archive for your platform from:
+# 1) Download the archive for your platform:
 # https://github.com/td-02/mcp-observer/releases/latest
+
+# 2) Run a local MCP server through mcpscope:
+mcpscope proxy --server ./your-mcp-server --db ./mcpscope.db
 ```
 
-```bash
-mcpscope proxy --server ./your-mcp-server --db traces.db
-```
-
-Open `http://localhost:4444`.
+Open [http://localhost:4444](http://localhost:4444).
 
 For commands with arguments:
 
@@ -60,7 +59,12 @@ For an existing HTTP MCP server:
 mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080
 ```
 
-For source builds, `make build` and `make test` regenerate the dashboard assets before compiling the Go binary.
+For source builds:
+
+```bash
+make build
+make test
+```
 
 The dashboard trace view supports text search plus `created_after` and `created_before` filtering, and the Alerts tab lets you edit, enable, disable, or delete rules in place.
 The Budgets tab shows live usage by team and window.
@@ -77,7 +81,7 @@ See [`examples/sdk-go`](examples/sdk-go/) and [`examples/sdk-typescript`](exampl
 Run with config:
 
 ```bash
-mcpscope proxy --config ./mcpscope.example.json -- uv run server.py
+mcpscope proxy --config ./mcpscope.yaml -- uv run server.py
 ```
 
 Export traces:
@@ -113,7 +117,13 @@ mcpscope budget reset --team team-alpha --window hour
 
 ## Config
 
-Example config: [`mcpscope.example.json`](mcpscope.example.json)
+Full schema: [docs/configuration.md](docs/configuration.md)
+
+Default config search order:
+
+1. `./mcpscope.yaml`
+2. `$HOME/.config/mcpscope/config.yaml`
+3. `/etc/mcpscope/config.yaml`
 
 Key fields:
 
@@ -129,6 +139,8 @@ Key fields:
 - `proxy.retainFor`: trace retention duration
 - `proxy.maxTraces`: trace cap
 - `--budgets-config`: YAML file with per-team call and token limits
+- `--shutdown-timeout`: graceful shutdown timeout, default `30s`
+- `--log-level`: `debug|info|warn|error`, default `info`
 
 CLI flags override config values.
 
@@ -145,6 +157,7 @@ Verified in this repo with:
 
 - The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist), which is checked in and embedded at build time.
 - `budgets-config` is separate from the main config file so you can rotate budget policy without changing proxy runtime settings.
+- `/metrics` exposes Prometheus-compatible metrics.
 - Rebuilding the Vite dashboard bundle currently needs Node `20.19+` or `22.12+`.
 - The HTTP server exposes `/healthz` for liveness and `/readyz` for readiness.
 - CI includes a smoke workflow that builds the packaged binary, starts a mock upstream, and exercises the dashboard and trace APIs end to end.
