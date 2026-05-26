@@ -11,29 +11,27 @@ import (
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "mcpscope.json")
-	err := os.WriteFile(path, []byte(`{
-  "version": 1,
-  "workspace": "acme",
-  "environment": "prod",
-  "authToken": "top-secret",
-  "notification": {
-    "webhookUrls": ["https://example.invalid/a"],
-    "slackWebhookUrls": ["https://hooks.slack.com/services/test"],
-    "pagerDutyRoutingKeys": ["routing-key"],
-    "retryMaxAttempts": 4,
-    "retryBackoffSeconds": 3
-  },
-  "proxy": {
-    "db": "traces.db",
-    "port": 5555,
-    "transport": "http",
-    "retainFor": "72h",
-    "maxTraces": 123,
-    "redactKeys": ["token"],
-    "otel": true
-  }
-}`), 0o644)
+	path := filepath.Join(t.TempDir(), "mcpscope.yaml")
+	err := os.WriteFile(path, []byte(`
+version: 1
+workspace: acme
+environment: prod
+authToken: top-secret
+notification:
+  webhookUrls: ["https://example.invalid/a"]
+  slackWebhookUrls: ["https://hooks.slack.com/services/test"]
+  pagerDutyRoutingKeys: ["routing-key"]
+  retryMaxAttempts: 4
+  retryBackoffSeconds: 3
+proxy:
+  db: traces.db
+  port: 5555
+  transport: http
+  retainFor: 72h
+  maxTraces: 123
+  redactKeys: [token]
+  otel: true
+`), 0o644)
 	if err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
@@ -62,12 +60,24 @@ func TestLoadConfig(t *testing.T) {
 func TestLoadRejectsUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "mcpscope.json")
-	if err := os.WriteFile(path, []byte(`{"version": 2}`), 0o644); err != nil {
+	path := filepath.Join(t.TempDir(), "mcpscope.yaml")
+	if err := os.WriteFile(path, []byte(`version: 2`), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
 	if _, err := Load(path); err == nil {
 		t.Fatalf("expected config version validation error")
+	}
+}
+
+func TestLoadRejectsEmptyPostgresDSN(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "mcpscope.yaml")
+	if err := os.WriteFile(path, []byte("proxy:\n  store: postgres\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatalf("expected dsn validation error")
 	}
 }

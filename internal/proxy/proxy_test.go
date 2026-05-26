@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +60,82 @@ func TestTraceTrackerCorrelatesRequestAndResponse(t *testing.T) {
 	}
 	if record.ServerID != "demo-server-id" {
 		t.Fatalf("server_id = %q, want %q", record.ServerID, "demo-server-id")
+	}
+}
+
+func TestHTTPMiddlewareSetsSecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{}
+	prepareConfig(&cfg)
+	handler := newHTTPHandler(cfg, nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'" {
+		t.Fatalf("Content-Security-Policy = %q", got)
+	}
+}
+
+func TestAPIRateLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{}
+	prepareConfig(&cfg)
+	handler := newHTTPHandler(cfg, nil)
+
+	limited := false
+	for i := 0; i < 130; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/traces", nil)
+		req.RemoteAddr = "198.51.100.12:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatalf("expected API limiter to reject excessive requests")
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{}
+	prepareConfig(&cfg)
+	_ = persistTraceRecord(context.Background(), cfg, traceAPIRecord{
+		ID:        "trace-1",
+		TraceID:   "trace-1",
+		ServerID:  "server-a",
+		Method:    "tools/call",
+		Status:    "success",
+		LatencyMs: 120,
+		CreatedAt: time.Now().UTC(),
+	})
+	handler := newHTTPHandler(cfg, nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	text := string(body)
+
+	if !strings.Contains(text, "mcpscope_traces_total") {
+		t.Fatalf("metrics output missing traces counter: %s", text)
+	}
+	if !strings.Contains(text, "mcpscope_proxy_duration_seconds_bucket") {
+		t.Fatalf("metrics output missing duration histogram: %s", text)
+	}
+	if !strings.Contains(text, "mcpscope_active_connections") {
+		t.Fatalf("metrics output missing active connections gauge: %s", text)
 	}
 }
 
