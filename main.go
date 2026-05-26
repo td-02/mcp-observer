@@ -26,7 +26,7 @@ func main() {
 	cmd.SetVersion(version)
 	cmd.SetBuildInfo(fmt.Sprintf("%s, %s/%s", runtime.Version(), runtime.GOOS, runtime.GOARCH))
 
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
+	if hasVersionFlag(os.Args[1:]) {
 		_, _ = fmt.Fprintln(os.Stdout, cmd.VersionString())
 		return
 	}
@@ -41,4 +41,13 @@ func main() {
 		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func hasVersionFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" {
+			return true
+		}
+	}
+	return false
 }
