@@ -153,6 +153,23 @@ Verified in this repo with:
 - fresh `mcpscope.exe` build
 - regenerated demo GIF from the current binary and dashboard
 
+Stress-tested locally (HTTP upstream + proxy):
+
+- Proxy forwarding path (`POST /`, JSON-RPC), `1200` requests, `60` workers:
+  - `1200/1200` successful, `0` errors
+  - `~689.65 req/s`, `85.19ms` average, `224ms` max latency
+- API limiter path (`GET /api/traces`), `300` requests, `40` workers:
+  - `120` successful, `180` rate-limited (`429`), `0` other errors
+
+Clean heavy benchmark (tuned HTTP connection reuse):
+
+- Proxy forwarding path (`POST /`, JSON-RPC), `50000` requests, `200` workers:
+  - `50000/50000` successful, `0` errors
+  - `~1403.52 req/s`
+  - latency: `141.80ms` avg, `138ms` p50, `217ms` p95, `284ms` p99, `808ms` max
+- API limiter path (`GET /api/traces`), `5000` requests, `120` workers:
+  - `120` successful, `4880` rate-limited (`429`), `0` other errors
+
 ## Notes
 
 - The dashboard served by the Go binary comes from [`dashboard/dist`](dashboard/dist), which is checked in and embedded at build time.
