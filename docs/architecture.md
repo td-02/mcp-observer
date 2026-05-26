@@ -13,6 +13,13 @@
    - optionally exported as an OTEL span
    - published to the dashboard SSE stream
 
+### Request interception details
+
+- Stdio transport is framed with `Content-Length` and parsed message-by-message.
+- HTTP transport forwards raw POST JSON-RPC payloads to upstream and mirrors status/body back to clients.
+- For request/response pairs, `mcpscope` correlates by JSON-RPC `id` and computes end-to-end latency.
+- Budget checks run before forwarding and can short-circuit requests with MCP error `-32000`.
+
 ## Storage layer
 
 The storage layer is abstracted behind the `TraceStore` interface so the persistence backend can be swapped later. The current implementation uses `modernc.org/sqlite` with embedded `golang-migrate` migrations.
@@ -53,3 +60,17 @@ flowchart LR
   Dashboard --> SSE["/events SSE"]
   Dashboard --> API["/api/traces /api/stats/*"]
 ```
+
+SSE fan-out is implemented as an in-process pub/sub hub. Each connected dashboard client receives newly persisted traces, with query filtering applied per subscriber.
+
+## Storage abstraction
+
+`TraceStore` defines the persistence contract used by the proxy and APIs. Core operations include:
+
+- trace insert/query/list
+- retention pruning
+- alert rule/event storage
+- latency/error aggregations
+- budget usage counters
+
+The proxy depends on the interface, not SQLite implementation details, so alternative backends can be introduced without changing request interception logic.

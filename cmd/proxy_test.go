@@ -158,7 +158,7 @@ func TestParseRetentionDuration(t *testing.T) {
 		wantErr bool
 	}{
 		{raw: "168h", want: "168h0m0s"},
-		{raw: "0", want: "0s"},
+		{raw: "0", wantErr: true},
 		{raw: "bad", wantErr: true},
 	}
 

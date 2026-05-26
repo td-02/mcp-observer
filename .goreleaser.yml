@@ -46,4 +46,39 @@ changelog:
 release:
   github:
     owner: td-02
-    name: mcpscope
+    name: mcp-observer
+
+dockers:
+  - image_templates:
+      - ghcr.io/td-02/mcpscope:{{ .Version }}
+      - ghcr.io/td-02/mcpscope:latest
+    dockerfile: Dockerfile
+    use: buildx
+    ids:
+      - mcpscope
+    goos: linux
+    goarch: amd64
+  - image_templates:
+      - ghcr.io/td-02/mcpscope:{{ .Version }}-arm64
+    dockerfile: Dockerfile
+    use: buildx
+    ids:
+      - mcpscope
+    goos: linux
+    goarch: arm64
+
+brews:
+  - repository:
+      owner: td-02
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/td-02/mcp-observer
+    description: Transparent MCP proxy with tracing, schema snapshots, and a live dashboard
+    license: MIT
+    commit_author:
+      name: mcpscope-bot
+      email: releases@mcpscope.dev
+    install: |
+      bin.install "mcpscope"
+    test: |
+      system "#{bin}/mcpscope", "--help"

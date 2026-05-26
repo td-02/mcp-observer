@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v1.0.0
+
+- Added production hardening middleware:
+  - security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy`)
+  - API rate limiting (token bucket, 120 req/min per IP on `/api/*`)
+- Added Prometheus-compatible `/metrics` endpoint with trace counters, proxy duration histogram, and active connection gauge.
+- Added graceful shutdown controls with `--shutdown-timeout` and signal-aware command execution.
+- Added structured JSON logging baseline using `log/slog` and configurable `--log-level`.
+- Added YAML config loading with default discovery order:
+  - `./mcpscope.yaml`
+  - `$HOME/.config/mcpscope/config.yaml`
+  - `/etc/mcpscope/config.yaml`
+- Added docs for configuration and operations:
+  - `docs/configuration.md`
+  - `docs/operations.md`
+- Added release-process template: `.github/RELEASE_TEMPLATE.md`.
+
 - Added SDK ingest support with `POST /api/ingest`, `sdk_reported` trace metadata, and thin Go / TypeScript SDKs.
 - Added trace search plus `created_after` and `created_before` filtering in the dashboard and trace APIs.
 - Added alert rule editing and enable/disable controls in the dashboard.
